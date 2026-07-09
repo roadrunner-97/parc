@@ -10,10 +10,12 @@ add_executable(parc_util_tests
     test_bitstream.cpp
     test_buf.cpp
     test_err.cpp
+    test_gen.cpp
     test_rng.cpp
+    test_stats.cpp
     test_xxh64.cpp
 )
-target_link_libraries(parc_util_tests PRIVATE parc GTest::gtest_main)
+target_link_libraries(parc_util_tests PRIVATE parc parc_gen GTest::gtest_main)
 target_include_directories(parc_util_tests
     PRIVATE ${CMAKE_SOURCE_DIR}/src
 )

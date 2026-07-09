@@ -9,6 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_library(parc STATIC
+    src/stat/stats.c
     src/util/bitstream.c
     src/util/buf.c
     src/util/err.c
@@ -20,6 +21,9 @@ target_include_directories(parc
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 target_compile_options(parc PRIVATE -Wall -Wextra -Wconversion -Werror)
+target_link_libraries(parc PUBLIC m)
+
+add_subdirectory(tools/parcgen)
 
 include(CTest)
 if(BUILD_TESTING)
