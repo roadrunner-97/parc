@@ -26,6 +26,11 @@ target_link_libraries(parc PUBLIC m)
 add_subdirectory(tools/parcgen)
 add_subdirectory(tools/parcent)
 
+option(PARC_BENCH "Build corpus benchmarks (needs zlib, lz4, zstd)" OFF)
+if(PARC_BENCH)
+    add_subdirectory(bench)
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
     add_subdirectory(tests)

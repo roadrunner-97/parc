@@ -1,0 +1,201 @@
+// Corpus-driven baseline benchmarks: zlib / lz4 / zstd compress and
+// decompress over every manifest entry, reporting bytes_per_second (of
+// uncompressed data, both directions) and a `ratio` counter
+// (compressed / original — lower is better).
+//
+// These are the numbers parc is measured against from day one. Archive a
+// run per commit with tools/run_bench.sh; filter with e.g.
+//   parc_bench --benchmark_filter='zstd.*/silesia'
+
+#include <benchmark/benchmark.h>
+
+#include <lz4.h>
+#include <zlib.h>
+#include <zstd.h>
+
+#include <cstdint>
+#include <cstdio>
+#include <fstream>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace {
+
+constexpr int kZlibLevel = 6;
+constexpr int kZstdLevel = 3;
+
+std::vector<uint8_t> load_file(const std::string &path) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) throw std::runtime_error("cannot open " + path);
+    auto size = f.tellg();
+    std::vector<uint8_t> data(static_cast<size_t>(size));
+    f.seekg(0);
+    f.read(reinterpret_cast<char *>(data.data()),
+           static_cast<std::streamsize>(data.size()));
+    if (!f) throw std::runtime_error("short read on " + path);
+    return data;
+}
+
+// Minimal extraction of "file" values from corpus/manifest.json — the
+// manifest is machine-written with one key per line, so a substring scan
+// is sufficient and avoids a JSON dependency.
+std::vector<std::string> manifest_files(const std::string &manifest_path) {
+    std::ifstream f(manifest_path);
+    if (!f) throw std::runtime_error("cannot open " + manifest_path);
+    std::vector<std::string> files;
+    std::string line;
+    const std::string key = "\"file\": \"";
+    while (std::getline(f, line)) {
+        auto at = line.find(key);
+        if (at == std::string::npos) continue;
+        at += key.size();
+        auto end = line.find('"', at);
+        if (end == std::string::npos) continue;
+        files.push_back(line.substr(at, end - at));
+    }
+    return files;
+}
+
+// ---- whole-buffer codec adapters ---------------------------------------
+// Each returns the compressed size; decompressors check exact output size.
+
+size_t zlib_compress(const std::vector<uint8_t> &in,
+                     std::vector<uint8_t> &out) {
+    uLongf dst = compressBound(static_cast<uLong>(in.size()));
+    out.resize(dst);
+    if (compress2(out.data(), &dst, in.data(),
+                  static_cast<uLong>(in.size()), kZlibLevel) != Z_OK)
+        throw std::runtime_error("zlib compress failed");
+    return dst;
+}
+
+void zlib_decompress(const std::vector<uint8_t> &comp, size_t comp_size,
+                     std::vector<uint8_t> &out, size_t orig_size) {
+    uLongf dst = static_cast<uLongf>(orig_size);
+    if (uncompress(out.data(), &dst, comp.data(),
+                   static_cast<uLong>(comp_size)) != Z_OK ||
+        dst != orig_size)
+        throw std::runtime_error("zlib decompress failed");
+}
+
+size_t lz4_compress(const std::vector<uint8_t> &in,
+                    std::vector<uint8_t> &out) {
+    int bound = LZ4_compressBound(static_cast<int>(in.size()));
+    out.resize(static_cast<size_t>(bound));
+    int n = LZ4_compress_default(
+        reinterpret_cast<const char *>(in.data()),
+        reinterpret_cast<char *>(out.data()),
+        static_cast<int>(in.size()), bound);
+    if (n <= 0) throw std::runtime_error("lz4 compress failed");
+    return static_cast<size_t>(n);
+}
+
+void lz4_decompress(const std::vector<uint8_t> &comp, size_t comp_size,
+                    std::vector<uint8_t> &out, size_t orig_size) {
+    int n = LZ4_decompress_safe(
+        reinterpret_cast<const char *>(comp.data()),
+        reinterpret_cast<char *>(out.data()),
+        static_cast<int>(comp_size), static_cast<int>(orig_size));
+    if (n < 0 || static_cast<size_t>(n) != orig_size)
+        throw std::runtime_error("lz4 decompress failed");
+}
+
+size_t zstd_compress(const std::vector<uint8_t> &in,
+                     std::vector<uint8_t> &out) {
+    size_t bound = ZSTD_compressBound(in.size());
+    out.resize(bound);
+    size_t n = ZSTD_compress(out.data(), bound, in.data(), in.size(),
+                             kZstdLevel);
+    if (ZSTD_isError(n)) throw std::runtime_error("zstd compress failed");
+    return n;
+}
+
+void zstd_decompress(const std::vector<uint8_t> &comp, size_t comp_size,
+                     std::vector<uint8_t> &out, size_t orig_size) {
+    size_t n = ZSTD_decompress(out.data(), orig_size, comp.data(), comp_size);
+    if (ZSTD_isError(n) || n != orig_size)
+        throw std::runtime_error("zstd decompress failed");
+}
+
+using compress_fn = size_t (*)(const std::vector<uint8_t> &,
+                               std::vector<uint8_t> &);
+using decompress_fn = void (*)(const std::vector<uint8_t> &, size_t,
+                               std::vector<uint8_t> &, size_t);
+
+void bm_compress(benchmark::State &state, const std::string &path,
+                 compress_fn fn) {
+    auto input = load_file(path);
+    std::vector<uint8_t> out;
+    size_t comp_size = 0;
+    for (auto _ : state) {
+        comp_size = fn(input, out);
+        benchmark::DoNotOptimize(out.data());
+    }
+    state.SetBytesProcessed(static_cast<int64_t>(state.iterations()) *
+                            static_cast<int64_t>(input.size()));
+    state.counters["ratio"] =
+        static_cast<double>(comp_size) / static_cast<double>(input.size());
+}
+
+void bm_decompress(benchmark::State &state, const std::string &path,
+                   compress_fn cfn, decompress_fn dfn) {
+    auto input = load_file(path);
+    std::vector<uint8_t> comp;
+    size_t comp_size = cfn(input, comp);
+    std::vector<uint8_t> out(input.size());
+    for (auto _ : state) {
+        dfn(comp, comp_size, out, input.size());
+        benchmark::DoNotOptimize(out.data());
+    }
+    state.SetBytesProcessed(static_cast<int64_t>(state.iterations()) *
+                            static_cast<int64_t>(input.size()));
+    state.counters["ratio"] =
+        static_cast<double>(comp_size) / static_cast<double>(input.size());
+}
+
+struct Codec {
+    const char *name;
+    compress_fn c;
+    decompress_fn d;
+};
+
+const Codec kCodecs[] = {
+    {"zlib-6", zlib_compress, zlib_decompress},
+    {"lz4", lz4_compress, lz4_decompress},
+    {"zstd-3", zstd_compress, zstd_decompress},
+};
+
+}  // namespace
+
+int main(int argc, char **argv) {
+    const std::string corpus_dir = PARC_CORPUS_DIR;
+    std::vector<std::string> files;
+    try {
+        files = manifest_files(corpus_dir + "/manifest.json");
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "parc_bench: %s\n", e.what());
+        std::fprintf(stderr,
+                     "parc_bench: run tools/fetch_corpus.py first\n");
+        return 1;
+    }
+
+    for (const auto &file : files) {
+        std::string path = corpus_dir + "/data/" + file;
+        for (const auto &codec : kCodecs) {
+            benchmark::RegisterBenchmark(
+                "compress/" + std::string(codec.name) + "/" + file,
+                bm_compress, path, codec.c);
+            benchmark::RegisterBenchmark(
+                "decompress/" + std::string(codec.name) + "/" + file,
+                bm_decompress, path, codec.c, codec.d);
+        }
+    }
+
+    benchmark::Initialize(&argc, argv);
+    if (benchmark::ReportUnrecognizedArguments(argc, argv)) return 1;
+    benchmark::RunSpecifiedBenchmarks();
+    benchmark::Shutdown();
+    return 0;
+}
