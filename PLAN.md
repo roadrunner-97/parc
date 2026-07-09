@@ -1,5 +1,10 @@
 # parc — implementation plan
 
+**Status (2026-07-09):** Phase 1 complete. Phase 2 complete: stats core
+(+ merge, LZ probe), parcgen generators + CLI, parcent CLI (ent-validated,
+multithreaded), corpus fetcher + manifest, benchmark harness with
+zlib/lz4/zstd baselines archived in `bench/results/`. Next: Phase 3.
+
 Phases are ordered so that measurement exists before the codec does, and
 correctness is locked in before performance work starts. Each phase ends green:
 all tests pass under the full sanitizer matrix before the next phase begins.
