@@ -4,7 +4,9 @@
 
 #include <gtest/gtest.h>
 
+#include "gen.h"
 #include "stat/stats.h"
+#include "util/buf.h"
 #include "util/rng.h"
 
 namespace {
@@ -193,4 +195,148 @@ TEST(Stats, EntropyProfileEdgeCases) {
     EXPECT_EQ(n, 4u);
     EXPECT_EQ(parc_entropy_profile(d, 10, 0, 4, out, &n), PARC_ERR_ARG);
     EXPECT_EQ(parc_entropy_profile(d, 10, 4, 0, out, &n), PARC_ERR_ARG);
+}
+
+namespace {
+
+// Feed data through k accumulators over consecutive spans (each split point
+// a multiple of 6), merge them in order, and check every readable result
+// matches a single-pass reference exactly.
+void check_merge_equals_single_pass(const std::vector<uint8_t> &data,
+                                    const std::vector<size_t> &splits) {
+    StatsPtr ref;
+    parc_stats_update(ref.st, data.data(), data.size());
+
+    StatsPtr acc;
+    size_t begin = 0;
+    for (size_t k = 0; k <= splits.size(); ++k) {
+        size_t end = k < splits.size() ? splits[k] : data.size();
+        StatsPtr part;
+        parc_stats_update(part.st, data.data() + begin, end - begin);
+        ASSERT_EQ(parc_stats_merge(acc.st, part.st), PARC_OK);
+        begin = end;
+    }
+
+    EXPECT_EQ(parc_stats_len(acc.st), parc_stats_len(ref.st));
+    EXPECT_DOUBLE_EQ(parc_stats_entropy_o0(acc.st),
+                     parc_stats_entropy_o0(ref.st));
+    EXPECT_DOUBLE_EQ(parc_stats_entropy_o1(acc.st),
+                     parc_stats_entropy_o1(ref.st));
+    EXPECT_DOUBLE_EQ(parc_stats_min_entropy(acc.st),
+                     parc_stats_min_entropy(ref.st));
+    EXPECT_DOUBLE_EQ(parc_stats_mean(acc.st), parc_stats_mean(ref.st));
+    double pa = -1, pr = -1;
+    EXPECT_DOUBLE_EQ(parc_stats_chi2(acc.st, &pa),
+                     parc_stats_chi2(ref.st, &pr));
+    EXPECT_DOUBLE_EQ(pa, pr);
+    EXPECT_DOUBLE_EQ(parc_stats_serial_corr(acc.st),
+                     parc_stats_serial_corr(ref.st));
+    EXPECT_DOUBLE_EQ(parc_stats_montecarlo_pi(acc.st),
+                     parc_stats_montecarlo_pi(ref.st));
+}
+
+}  // namespace
+
+TEST(StatsMerge, TwoWaySplit) {
+    auto v = random_bytes(100002, 21);   // not a multiple of 6
+    check_merge_equals_single_pass(v, {49998});
+}
+
+TEST(StatsMerge, ManyParts) {
+    auto v = random_bytes(60000, 22);
+    check_merge_equals_single_pass(v, {6, 12, 30000, 30006, 59994});
+}
+
+TEST(StatsMerge, StructuredData) {
+    // Text-like data exercises the pair table and serial correlation more
+    // than uniform bytes do.
+    parc_rng r;
+    parc_rng_seed(&r, 23);
+    parc_buf b;
+    parc_buf_init(&b);
+    ASSERT_EQ(parc_gen_text(&r, 300000, &b), PARC_OK);
+    std::vector<uint8_t> v(b.data, b.data + b.len);
+    parc_buf_free(&b);
+    check_merge_equals_single_pass(v, {149994});
+}
+
+TEST(StatsMerge, EmptySides) {
+    auto v = random_bytes(6000, 24);
+
+    StatsPtr empty, full;
+    parc_stats_update(full.st, v.data(), v.size());
+
+    // empty src into anything: no-op, OK even with a pending partial group
+    StatsPtr odd;
+    parc_stats_update(odd.st, v.data(), 7);
+    EXPECT_EQ(parc_stats_merge(odd.st, empty.st), PARC_OK);
+    EXPECT_EQ(parc_stats_len(odd.st), 7u);
+
+    // empty dst absorbs src wholesale
+    StatsPtr acc;
+    EXPECT_EQ(parc_stats_merge(acc.st, full.st), PARC_OK);
+    EXPECT_EQ(parc_stats_len(acc.st), v.size());
+    EXPECT_DOUBLE_EQ(parc_stats_entropy_o0(acc.st),
+                     parc_stats_entropy_o0(full.st));
+}
+
+TEST(StatsMerge, PendingGroupRejected) {
+    auto v = random_bytes(100, 25);
+    StatsPtr dst, src;
+    parc_stats_update(dst.st, v.data(), 7);  // 7 % 6 != 0
+    parc_stats_update(src.st, v.data(), 12);
+    EXPECT_EQ(parc_stats_merge(dst.st, src.st), PARC_ERR_ARG);
+    EXPECT_EQ(parc_stats_len(dst.st), 7u);  // unchanged
+}
+
+TEST(LzProbe, EmptyAndConstant) {
+    EXPECT_DOUBLE_EQ(parc_lz_probe(nullptr, 0), 1.0);
+
+    std::vector<uint8_t> z(64 << 10, 0x55);
+    EXPECT_LT(parc_lz_probe(z.data(), z.size()), 0.01);
+}
+
+TEST(LzProbe, RandomIsIncompressible) {
+    auto v = random_bytes(1 << 20, 31);
+    double r = parc_lz_probe(v.data(), v.size());
+    EXPECT_GT(r, 1.0);
+    EXPECT_LE(r, 9.0 / 8.0);
+}
+
+TEST(LzProbe, OrderingSignal) {
+    // More redundant classes must score lower.
+    parc_rng r;
+    parc_buf text, runs;
+    parc_buf_init(&text);
+    parc_buf_init(&runs);
+    parc_rng_seed(&r, 32);
+    ASSERT_EQ(parc_gen_text(&r, 512 << 10, &text), PARC_OK);
+    parc_rng_seed(&r, 33);
+    ASSERT_EQ(parc_gen_runs(&r, 64.0, 512 << 10, &runs), PARC_OK);
+    auto rnd = random_bytes(512 << 10, 34);
+
+    double s_text = parc_lz_probe(text.data, text.len);
+    double s_runs = parc_lz_probe(runs.data, runs.len);
+    double s_rnd = parc_lz_probe(rnd.data(), rnd.size());
+    parc_buf_free(&text);
+    parc_buf_free(&runs);
+
+    EXPECT_LT(s_text, 0.8);
+    EXPECT_LT(s_runs, 0.2);
+    EXPECT_LT(s_runs, s_text);
+    EXPECT_LT(s_text, s_rnd);
+}
+
+TEST(LzProbe, Deterministic) {
+    auto v = random_bytes(100000, 35);
+    EXPECT_DOUBLE_EQ(parc_lz_probe(v.data(), v.size()),
+                     parc_lz_probe(v.data(), v.size()));
+}
+
+TEST(LzProbe, ShortInputs) {
+    uint8_t d[3] = {1, 2, 3};
+    // too short for any match: pure literal cost
+    EXPECT_DOUBLE_EQ(parc_lz_probe(d, 3), 9.0 / 8.0);
+    uint8_t one = 0;
+    EXPECT_DOUBLE_EQ(parc_lz_probe(&one, 1), 9.0 / 8.0);
 }

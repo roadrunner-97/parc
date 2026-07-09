@@ -29,6 +29,17 @@ void parc_stats_update(parc_stats *st, const void *data, size_t len);
 /* Total bytes consumed. */
 uint64_t parc_stats_len(const parc_stats *st);
 
+/* Fold src into dst as if src's bytes had been fed to dst immediately after
+ * dst's own — the boundary pair (dst's last byte, src's first byte) is
+ * counted. Every readable result on the merged dst must equal what a single
+ * accumulator fed the concatenated stream would report.
+ *
+ * Because Monte Carlo groups are positional and the raw bytes are gone,
+ * dst's length must be a multiple of 6 (no partial group pending) unless
+ * src is empty; otherwise PARC_ERR_ARG and dst is unchanged. src is not
+ * modified. dst and src must be distinct. */
+parc_err parc_stats_merge(parc_stats *dst, const parc_stats *src);
+
 /* Order-0 Shannon entropy in bits/byte: -sum p_i log2 p_i over the byte
  * histogram. Empty input -> 0.0. */
 double parc_stats_entropy_o0(const parc_stats *st);
@@ -80,6 +91,17 @@ double parc_chi2_sf(double x, unsigned df);
  * windows, PARC_OK. */
 parc_err parc_entropy_profile(const uint8_t *data, size_t len, size_t window,
                               size_t stride, double *out, size_t *out_n);
+
+/* Fast LZ-compressibility probe over a complete buffer (not streaming).
+ * Greedy single-entry hash-table match search (4-byte minimum match,
+ * 64 KiB window) charged with a fixed cost model: 9 bits per literal byte,
+ * 33 bits per match regardless of length. Returns estimated compressed size
+ * over input size — lower means more LZ-compressible. Incompressible input
+ * approaches 9/8 = 1.125; len == 0 returns 1.0. Deterministic: a pure
+ * function of the buffer contents. This is an ordering signal for corpus
+ * tagging and the codec's stored-block bailout, not a promise of achievable
+ * ratio. */
+double parc_lz_probe(const uint8_t *data, size_t len);
 
 #ifdef __cplusplus
 }

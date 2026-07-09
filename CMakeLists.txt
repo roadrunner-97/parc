@@ -24,6 +24,7 @@ target_compile_options(parc PRIVATE -Wall -Wextra -Wconversion -Werror)
 target_link_libraries(parc PUBLIC m)
 
 add_subdirectory(tools/parcgen)
+add_subdirectory(tools/parcent)
 
 include(CTest)
 if(BUILD_TESTING)

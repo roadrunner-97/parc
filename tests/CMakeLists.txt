@@ -23,3 +23,26 @@ target_compile_options(parc_util_tests PRIVATE -Wall -Wextra -Werror)
 
 include(GoogleTest)
 gtest_discover_tests(parc_util_tests)
+
+# CLI smoke tests. The thread-invariance test is the one that exercises
+# parcent's worker threads under TSan.
+add_test(NAME cli_parcgen_deterministic
+    COMMAND bash -c "\
+        $<TARGET_FILE:parcgen> -s 5 -n 1M -o cli_a.bin text && \
+        $<TARGET_FILE:parcgen> -s 5 -n 1M -o cli_b.bin text && \
+        cmp cli_a.bin cli_b.bin"
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+add_test(NAME cli_parcent_thread_invariance
+    COMMAND bash -c "\
+        $<TARGET_FILE:parcgen> -s 6 -n 8M -o cli_t.bin json-log && \
+        $<TARGET_FILE:parcent> -c -t 1 cli_t.bin > cli_t1.csv && \
+        $<TARGET_FILE:parcent> -c -t 8 cli_t.bin > cli_t8.csv && \
+        diff cli_t1.csv cli_t8.csv"
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+add_test(NAME cli_parcent_stdin_matches_file
+    COMMAND bash -c "\
+        $<TARGET_FILE:parcgen> -s 8 -n 3M -o cli_s.bin records 64 && \
+        $<TARGET_FILE:parcent> -c cli_s.bin | cut -d, -f2-10 > cli_f.csv && \
+        $<TARGET_FILE:parcent> -c < cli_s.bin | cut -d, -f2-10 > cli_p.csv && \
+        diff cli_f.csv cli_p.csv"
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})

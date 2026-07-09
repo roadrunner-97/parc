@@ -5,3 +5,8 @@ target_include_directories(parc_gen
     PRIVATE ${CMAKE_SOURCE_DIR}/src
 )
 target_compile_options(parc_gen PRIVATE -Wall -Wextra -Wconversion -Werror)
+
+add_executable(parcgen main.c)
+target_link_libraries(parcgen PRIVATE parc_gen)
+target_include_directories(parcgen PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(parcgen PRIVATE -Wall -Wextra -Wconversion -Werror)

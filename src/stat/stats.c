@@ -106,6 +106,46 @@ uint64_t parc_stats_len(const parc_stats *st)
     return st->n;
 }
 
+parc_err parc_stats_merge(parc_stats *dst, const parc_stats *src)
+{
+    if (src->n == 0)
+        return PARC_OK;
+    if (dst->mc_carry_n != 0)
+        return PARC_ERR_ARG;
+
+    if (dst->has_prev && src->has_first) {
+        dst->pair[dst->prev_byte][src->first_byte]++;
+        dst->t1_pairs += (uint64_t)dst->prev_byte * (uint64_t)src->first_byte;
+    }
+
+    for (size_t i = 0; i < 256; ++i)
+        dst->hist[i] += src->hist[i];
+    for (size_t c = 0; c < 256; ++c)
+        for (size_t b = 0; b < 256; ++b)
+            dst->pair[c][b] += src->pair[c][b];
+
+    dst->n += src->n;
+    dst->sum_u += src->sum_u;
+    dst->sum_u2 += src->sum_u2;
+    dst->t1_pairs += src->t1_pairs;
+
+    if (!dst->has_first) {
+        dst->has_first = src->has_first;
+        dst->first_byte = src->first_byte;
+    }
+    if (src->has_prev) {
+        dst->has_prev = 1;
+        dst->prev_byte = src->prev_byte;
+    }
+
+    memcpy(dst->mc_carry, src->mc_carry, sizeof(dst->mc_carry));
+    dst->mc_carry_n = src->mc_carry_n;
+    dst->mc_points += src->mc_points;
+    dst->mc_inside += src->mc_inside;
+
+    return PARC_OK;
+}
+
 double parc_stats_entropy_o0(const parc_stats *st)
 {
     if (st->n == 0)
@@ -327,4 +367,50 @@ parc_err parc_entropy_profile(const uint8_t *data, size_t len, size_t window,
     }
     *out_n = count;
     return PARC_OK;
+}
+
+#define LZP_HASH_BITS 15
+#define LZP_MIN_MATCH 4
+#define LZP_WINDOW 65536
+
+static uint32_t lzp_hash(const uint8_t *p)
+{
+    uint32_t v;
+    memcpy(&v, p, 4);
+    return (v * 2654435761u) >> (32 - LZP_HASH_BITS);
+}
+
+double parc_lz_probe(const uint8_t *data, size_t len)
+{
+    if (len == 0)
+        return 1.0;
+
+    /* Positions stored +1 so 0 means "empty slot". */
+    uint32_t *table = (uint32_t *)calloc(1u << LZP_HASH_BITS, sizeof(*table));
+    if (table == NULL) /* degrade to the all-literals estimate */
+        return 9.0 / 8.0;
+
+    uint64_t bits = 0;
+    size_t i = 0;
+    while (i + LZP_MIN_MATCH <= len) {
+        uint32_t h = lzp_hash(data + i);
+        size_t cand = table[h];
+        table[h] = (uint32_t)(i + 1);
+
+        if (cand != 0 && i + 1 - cand <= LZP_WINDOW &&
+            memcmp(data + (cand - 1), data + i, LZP_MIN_MATCH) == 0) {
+            size_t m = LZP_MIN_MATCH;
+            while (i + m < len && data[cand - 1 + m] == data[i + m])
+                m++;
+            bits += 33;
+            i += m;
+        } else {
+            bits += 9;
+            i++;
+        }
+    }
+    bits += 9 * (uint64_t)(len - i); /* tail too short to match */
+
+    free(table);
+    return (double)bits / (8.0 * (double)len);
 }
