@@ -16,7 +16,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     FILE *in = fmemopen((void *)data, size, "rb");
     if (!in)
         return 0;
-    parc_decompress_stream(in, NULL, NULL);
+    parc_decompress_stream(in, NULL, NULL, NULL);
     fclose(in);
     return 0;
 }

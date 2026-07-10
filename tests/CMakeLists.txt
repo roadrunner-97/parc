@@ -16,6 +16,7 @@ add_executable(parc_util_tests
     test_golden.cpp
     test_huffman.cpp
     test_lz.cpp
+    test_mt.cpp
     test_rng.cpp
     test_stats.cpp
     test_xxh64.cpp
@@ -71,6 +72,16 @@ add_test(NAME cli_parc_pipe_roundtrip
         $<TARGET_FILE:parc_cli> c -b 16 < pz_p.bin | \
         $<TARGET_FILE:parc_cli> d > pz_p.out && \
         cmp pz_p.bin pz_p.out"
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+add_test(NAME cli_parc_mt_roundtrip
+    COMMAND bash -c "\
+        set -o pipefail && \
+        $<TARGET_FILE:parcgen> -s 15 -n 9M -o pz_mt.bin json-log && \
+        $<TARGET_FILE:parc_cli> c -b 16 -T 0 pz_mt.bin -o pz_mt.parc && \
+        $<TARGET_FILE:parc_cli> c -b 16 pz_mt.bin | cmp pz_mt.parc - && \
+        $<TARGET_FILE:parc_cli> d -T 4 pz_mt.parc -o pz_mt.out && \
+        cmp pz_mt.bin pz_mt.out && \
+        $<TARGET_FILE:parc_cli> t -T 0 pz_mt.parc"
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 add_test(NAME cli_parc_rejects_corrupt
     COMMAND bash -c "\

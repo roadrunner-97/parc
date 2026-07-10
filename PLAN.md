@@ -1,6 +1,6 @@
 # parc — implementation plan
 
-**Status (2026-07-10):** Phases 1–3 complete. Phase 2 delivered stats core
+**Status (2026-07-10):** Phases 1–4 complete. Phase 2 delivered stats core
 (+ merge, LZ probe), parcgen generators + CLI, parcent CLI (ent-validated,
 multithreaded, with `tools/parcent/ent-diff.py` as a standing CTest
 differential test against `ent`), corpus fetcher + manifest, benchmark
@@ -18,7 +18,21 @@ First corpus numbers (single-threaded, see `bench/results/`): ratio sits
 between lz4 and zlib-6 (e.g. enwik8 0.403 vs lz4 0.573 / zlib 0.365 /
 zstd-3 0.354); compression 180–550 MB/s (5–8x zlib-6); decompression
 90–390 MB/s is the known gap — bit-serial Huffman decode, addressed by
-table-based decode + FSE in Phase 5. Next: Phase 4.
+table-based decode + FSE in Phase 5.
+Phase 4 delivered multithreading both directions: generic ordered pipeline
+(`src/codec/mt.c` — caller thread reads blocks in sequence, N pthread
+workers transform out of order, one writer thread re-serializes; 2N slots
+in flight), frame callbacks in `src/codec/frame_mt.c` over shared wire
+internals (`frame_int.h`), `parc_copts.threads`/`parc_dopts.threads` API
+(0/1 = single-threaded reference path kept intact), CLI `-T/--threads`
+(0 = nproc). Frames are bit-identical for every thread count (asserted in
+`tests/test_mt.cpp`: thread sweep 1/2/nproc/2nproc vs single-threaded
+reference, many-block stress, threads > blocks, empty input, MT corruption
+and full truncation sweeps); whole matrix green incl. TSan. enwik8 spot
+check (24-core): 0.54 s → 0.055 s compress, 0.56 s → 0.056 s decompress
+at T=16 (~10x, ~1.8 GB/s both ways, saturating ~T=16); bench harness
+gained parc-0-t{2,4,8,16} entries to track scaling per commit. Next:
+Phase 5.
 
 Phases are ordered so that measurement exists before the codec does, and
 correctness is locked in before performance work starts. Each phase ends green:

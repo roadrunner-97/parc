@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "parc/parc.h"
 
@@ -26,6 +27,8 @@ static void usage(FILE *to)
         "options:\n"
         "  -b, --block-log N  compress with max block size 2^N bytes,\n"
         "                     N in 12..24 (default 20 = 1 MiB)\n"
+        "  -T, --threads N    use N worker threads (0 = one per CPU;\n"
+        "                     default 1)\n"
         "  -o, --out FILE     write to FILE instead of stdout\n"
         "  -v, --verbose      print a frame summary to stderr\n"
         "  -h, --help         show this help\n",
@@ -62,7 +65,8 @@ int main(int argc, char **argv)
 {
     enum { CMD_NONE, CMD_C, CMD_D, CMD_T } cmd = CMD_NONE;
     const char *in_path = NULL, *out_path = NULL;
-    parc_copts copts = {0};
+    parc_copts copts = {0, 0};
+    unsigned threads = 1;
     int verbose = 0;
 
     for (int i = 1; i < argc; ++i) {
@@ -77,6 +81,13 @@ int main(int argc, char **argv)
             if (++i >= argc || parse_uint(argv[i], &copts.block_log) != 0 ||
                 copts.block_log < 12 || copts.block_log > 24) {
                 fputs("parc: -b needs an integer in 12..24\n", stderr);
+                return 2;
+            }
+        } else if (strcmp(a, "-T") == 0 || strcmp(a, "--threads") == 0) {
+            if (++i >= argc || parse_uint(argv[i], &threads) != 0 ||
+                threads > PARC_THREADS_MAX) {
+                fprintf(stderr, "parc: -T needs an integer in 0..%d\n",
+                        PARC_THREADS_MAX);
                 return 2;
             }
         } else if (strcmp(a, "-o") == 0 || strcmp(a, "--out") == 0) {
@@ -140,17 +151,26 @@ int main(int argc, char **argv)
         }
     }
 
+    if (threads == 0) { /* -T 0: one worker per online CPU */
+        long n = sysconf(_SC_NPROCESSORS_ONLN);
+        threads = n < 1 ? 1
+                  : n > PARC_THREADS_MAX ? PARC_THREADS_MAX
+                                         : (unsigned)n;
+    }
+
     parc_info fi;
     parc_err err;
     const char *name, *done;
     if (cmd == CMD_C) {
         name = "compress";
         done = "compressed";
+        copts.threads = threads;
         err = parc_compress_stream(in, out, &copts, &fi);
     } else {
         name = cmd == CMD_D ? "decompress" : "verify";
         done = cmd == CMD_D ? "decompressed" : "verified";
-        err = parc_decompress_stream(in, out, &fi);
+        parc_dopts dopts = {threads};
+        err = parc_decompress_stream(in, out, &dopts, &fi);
     }
 
     int rc = 0;

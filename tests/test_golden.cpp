@@ -36,7 +36,7 @@ std::vector<uint8_t> decode(const std::vector<uint8_t> &frame) {
     EXPECT_EQ(fwrite(frame.data(), 1, frame.size(), fin), frame.size());
     rewind(fin);
     FILE *fout = tmpfile();
-    EXPECT_EQ(parc_decompress_stream(fin, fout, nullptr), PARC_OK);
+    EXPECT_EQ(parc_decompress_stream(fin, fout, nullptr, nullptr), PARC_OK);
     rewind(fout);
     std::vector<uint8_t> v;
     uint8_t buf[4096];

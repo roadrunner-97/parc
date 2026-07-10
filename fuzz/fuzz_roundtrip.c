@@ -16,7 +16,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     if (size < 1)
         return 0;
-    parc_copts opts = {12 + data[0] % 6u};
+    parc_copts opts = {12 + data[0] % 6u, 0};
     data++;
     size--;
 
@@ -43,7 +43,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     FILE *bout = open_memstream(&back, &back_len);
     if (!cin || !bout)
         abort();
-    if (parc_decompress_stream(cin, bout, NULL) != PARC_OK)
+    if (parc_decompress_stream(cin, bout, NULL, NULL) != PARC_OK)
         abort();
     fclose(cin);
     fclose(bout);

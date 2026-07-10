@@ -36,7 +36,7 @@ std::vector<uint8_t> compress(const std::vector<uint8_t> &in,
                               unsigned block_log, parc_info *fi = nullptr) {
     FILE *fin = file_of(in);
     FILE *fout = tmpfile();
-    parc_copts opts = {block_log};
+    parc_copts opts = {block_log, 0};
     EXPECT_EQ(parc_compress_stream(fin, fout, &opts, fi), PARC_OK);
     auto frame = slurp(fout);
     fclose(fin);
@@ -49,7 +49,7 @@ parc_err decompress(const std::vector<uint8_t> &frame,
                     std::vector<uint8_t> *out, parc_info *fi = nullptr) {
     FILE *fin = file_of(frame);
     FILE *fout = out ? tmpfile() : nullptr;
-    parc_err err = parc_decompress_stream(fin, fout, fi);
+    parc_err err = parc_decompress_stream(fin, fout, nullptr, fi);
     if (out)
         *out = slurp(fout);
     fclose(fin);
@@ -151,7 +151,7 @@ TEST(Frame, BadOptionsRejected) {
     FILE *fin = file_of({});
     FILE *fout = tmpfile();
     for (unsigned bl : {11u, 25u, 99u}) {
-        parc_copts opts = {bl};
+        parc_copts opts = {bl, 0};
         EXPECT_EQ(parc_compress_stream(fin, fout, &opts, nullptr),
                   PARC_ERR_ARG)
             << bl;

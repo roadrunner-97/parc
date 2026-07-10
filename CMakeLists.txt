@@ -8,11 +8,15 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+find_package(Threads REQUIRED)
+
 add_library(parc STATIC
     src/codec/block.c
     src/codec/frame.c
+    src/codec/frame_mt.c
     src/codec/huffman.c
     src/codec/lz.c
+    src/codec/mt.c
     src/stat/stats.c
     src/util/bitstream.c
     src/util/buf.c
@@ -25,7 +29,7 @@ target_include_directories(parc
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 target_compile_options(parc PRIVATE -Wall -Wextra -Wconversion -Werror)
-target_link_libraries(parc PUBLIC m)
+target_link_libraries(parc PUBLIC m Threads::Threads)
 
 add_subdirectory(tools/parc)
 add_subdirectory(tools/parcgen)

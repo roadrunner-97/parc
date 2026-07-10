@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -125,14 +126,16 @@ void zstd_decompress(const std::vector<uint8_t> &comp, size_t comp_size,
 
 // parc's v0 API is stdio streams; fmemopen/open_memstream adapt it to the
 // whole-buffer shape. The memstream copy is billed to parc — acceptable
-// noise until a memory API lands (Phase 5).
-size_t parc0_compress(const std::vector<uint8_t> &in,
-                      std::vector<uint8_t> &out) {
+// noise until a memory API lands (Phase 5). threads = 1 is the
+// single-threaded reference path; >= 2 exercises the Phase 4 pipeline
+// (the parc-0-tN codec entries track scaling efficiency per commit).
+size_t parc0_compress_t(unsigned threads, const std::vector<uint8_t> &in,
+                        std::vector<uint8_t> &out) {
     FILE *fin = fmemopen(const_cast<uint8_t *>(in.data()), in.size(), "rb");
     char *buf = nullptr;
     size_t len = 0;
     FILE *fout = open_memstream(&buf, &len);
-    parc_copts opts = {0};
+    parc_copts opts = {0, threads};
     if (!fin || !fout ||
         parc_compress_stream(fin, fout, &opts, nullptr) != PARC_OK)
         throw std::runtime_error("parc compress failed");
@@ -143,13 +146,16 @@ size_t parc0_compress(const std::vector<uint8_t> &in,
     return len;
 }
 
-void parc0_decompress(const std::vector<uint8_t> &comp, size_t comp_size,
-                      std::vector<uint8_t> &out, size_t orig_size) {
+void parc0_decompress_t(unsigned threads, const std::vector<uint8_t> &comp,
+                        size_t comp_size, std::vector<uint8_t> &out,
+                        size_t orig_size) {
     FILE *fin = fmemopen(const_cast<uint8_t *>(comp.data()), comp_size, "rb");
     char *buf = nullptr;
     size_t len = 0;
     FILE *fout = open_memstream(&buf, &len);
-    if (!fin || !fout || parc_decompress_stream(fin, fout, nullptr) != PARC_OK)
+    parc_dopts opts = {threads};
+    if (!fin || !fout ||
+        parc_decompress_stream(fin, fout, &opts, nullptr) != PARC_OK)
         throw std::runtime_error("parc decompress failed");
     fclose(fin);
     fclose(fout);
@@ -158,10 +164,20 @@ void parc0_decompress(const std::vector<uint8_t> &comp, size_t comp_size,
     free(buf);
 }
 
-using compress_fn = size_t (*)(const std::vector<uint8_t> &,
-                               std::vector<uint8_t> &);
-using decompress_fn = void (*)(const std::vector<uint8_t> &, size_t,
-                               std::vector<uint8_t> &, size_t);
+size_t parc0_compress(const std::vector<uint8_t> &in,
+                      std::vector<uint8_t> &out) {
+    return parc0_compress_t(1, in, out);
+}
+
+void parc0_decompress(const std::vector<uint8_t> &comp, size_t comp_size,
+                      std::vector<uint8_t> &out, size_t orig_size) {
+    parc0_decompress_t(1, comp, comp_size, out, orig_size);
+}
+
+using compress_fn = std::function<size_t(const std::vector<uint8_t> &,
+                                         std::vector<uint8_t> &)>;
+using decompress_fn = std::function<void(const std::vector<uint8_t> &, size_t,
+                                         std::vector<uint8_t> &, size_t)>;
 
 void bm_compress(benchmark::State &state, const std::string &path,
                  compress_fn fn) {
@@ -195,17 +211,27 @@ void bm_decompress(benchmark::State &state, const std::string &path,
 }
 
 struct Codec {
-    const char *name;
+    std::string name;
     compress_fn c;
     decompress_fn d;
 };
 
-const Codec kCodecs[] = {
-    {"zlib-6", zlib_compress, zlib_decompress},
-    {"lz4", lz4_compress, lz4_decompress},
-    {"zstd-3", zstd_compress, zstd_decompress},
-    {"parc-0", parc0_compress, parc0_decompress},
-};
+std::vector<Codec> make_codecs() {
+    std::vector<Codec> codecs = {
+        {"zlib-6", zlib_compress, zlib_decompress},
+        {"lz4", lz4_compress, lz4_decompress},
+        {"zstd-3", zstd_compress, zstd_decompress},
+        {"parc-0", parc0_compress, parc0_decompress},
+    };
+    // thread-scaling sweep for the Phase 4 pipeline
+    for (unsigned t : {2u, 4u, 8u, 16u}) {
+        using namespace std::placeholders;
+        codecs.push_back({"parc-0-t" + std::to_string(t),
+                          std::bind(parc0_compress_t, t, _1, _2),
+                          std::bind(parc0_decompress_t, t, _1, _2, _3, _4)});
+    }
+    return codecs;
+}
 
 }  // namespace
 
@@ -221,14 +247,15 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    const auto codecs = make_codecs();
     for (const auto &file : files) {
         std::string path = corpus_dir + "/data/" + file;
-        for (const auto &codec : kCodecs) {
+        for (const auto &codec : codecs) {
             benchmark::RegisterBenchmark(
-                "compress/" + std::string(codec.name) + "/" + file,
+                "compress/" + codec.name + "/" + file,
                 bm_compress, path, codec.c);
             benchmark::RegisterBenchmark(
-                "decompress/" + std::string(codec.name) + "/" + file,
+                "decompress/" + codec.name + "/" + file,
                 bm_decompress, path, codec.c, codec.d);
         }
     }

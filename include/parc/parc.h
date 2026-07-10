@@ -10,9 +10,14 @@
 extern "C" {
 #endif
 
-/* parc codec public API, format v0 (docs/FORMAT.md). Single-threaded,
- * streaming over stdio: neither stream needs to be seekable, so files,
- * pipes and fmemopen()/open_memstream() buffers all work. */
+/* parc codec public API, format v0 (docs/FORMAT.md). Streaming over stdio:
+ * neither stream needs to be seekable, so files, pipes and fmemopen()/
+ * open_memstream() buffers all work. Optionally multithreaded (see the
+ * threads fields); a frame is bit-identical for every thread count, and
+ * decoding accepts any frame regardless of how it was produced. */
+
+/* Upper bound on the threads fields below. */
+#define PARC_THREADS_MAX 512
 
 typedef struct parc_copts {
     /* log2 of the maximum block size: 0 for the default (20 → 1 MiB),
@@ -20,7 +25,18 @@ typedef struct parc_copts {
      * at the cost of memory: compression uses ~10x block size,
      * decompression ~2x. */
     unsigned block_log;
+    /* worker threads: 0 or 1 compresses on the calling thread; N >= 2
+     * runs a pipeline of N compression workers plus a writer thread,
+     * keeping 2N blocks in flight (memory ~N x 14x block size). Values
+     * above PARC_THREADS_MAX are rejected with PARC_ERR_ARG. */
+    unsigned threads;
 } parc_copts;
+
+typedef struct parc_dopts {
+    /* worker threads for decompression; same contract as parc_copts.threads
+     * (memory ~N x 4x block size, block size taken from the frame header). */
+    unsigned threads;
+} parc_dopts;
 
 typedef struct parc_info {
     uint64_t raw_bytes;   /* content size */
@@ -30,17 +46,19 @@ typedef struct parc_info {
 } parc_info;
 
 /* Compress all of in (to EOF) into one frame on out. opts and info may be
- * NULL. Returns PARC_OK, PARC_ERR_ARG (bad opts), PARC_ERR_NOMEM, or
- * PARC_ERR_IO (read or write failure). */
+ * NULL. Returns PARC_OK, PARC_ERR_ARG (bad opts), PARC_ERR_NOMEM (allocation
+ * or thread creation failed), or PARC_ERR_IO (read or write failure). */
 parc_err parc_compress_stream(FILE *in, FILE *out, const parc_copts *opts,
                               parc_info *info);
 
 /* Decompress exactly one frame from in onto out, verifying everything
  * FORMAT.md requires (structure, per-block hashes, stream hash, index,
  * exact EOF after the frame). out == NULL verifies without writing.
- * info may be NULL and is filled on success. On any error, output already
- * written to out stays written (callers should discard the file). */
-parc_err parc_decompress_stream(FILE *in, FILE *out, parc_info *info);
+ * opts and info may be NULL; info is filled on success. On any error,
+ * output already written to out stays written (callers should discard
+ * the file). */
+parc_err parc_decompress_stream(FILE *in, FILE *out, const parc_dopts *opts,
+                                parc_info *info);
 
 #ifdef __cplusplus
 }
