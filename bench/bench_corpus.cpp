@@ -214,21 +214,26 @@ struct Codec {
     std::string name;
     compress_fn c;
     decompress_fn d;
+    // Multithreaded codecs must be timed on wall clock: the calling
+    // thread sleeps while workers run, so the default CPU-time-based
+    // bytes_per_second would be wildly inflated.
+    bool real_time;
 };
 
 std::vector<Codec> make_codecs() {
     std::vector<Codec> codecs = {
-        {"zlib-6", zlib_compress, zlib_decompress},
-        {"lz4", lz4_compress, lz4_decompress},
-        {"zstd-3", zstd_compress, zstd_decompress},
-        {"parc-0", parc0_compress, parc0_decompress},
+        {"zlib-6", zlib_compress, zlib_decompress, false},
+        {"lz4", lz4_compress, lz4_decompress, false},
+        {"zstd-3", zstd_compress, zstd_decompress, false},
+        {"parc-0", parc0_compress, parc0_decompress, false},
     };
     // thread-scaling sweep for the Phase 4 pipeline
     for (unsigned t : {2u, 4u, 8u, 16u}) {
         using namespace std::placeholders;
         codecs.push_back({"parc-0-t" + std::to_string(t),
                           std::bind(parc0_compress_t, t, _1, _2),
-                          std::bind(parc0_decompress_t, t, _1, _2, _3, _4)});
+                          std::bind(parc0_decompress_t, t, _1, _2, _3, _4),
+                          true});
     }
     return codecs;
 }
@@ -251,12 +256,16 @@ int main(int argc, char **argv) {
     for (const auto &file : files) {
         std::string path = corpus_dir + "/data/" + file;
         for (const auto &codec : codecs) {
-            benchmark::RegisterBenchmark(
+            auto *c = benchmark::RegisterBenchmark(
                 "compress/" + codec.name + "/" + file,
                 bm_compress, path, codec.c);
-            benchmark::RegisterBenchmark(
+            auto *d = benchmark::RegisterBenchmark(
                 "decompress/" + codec.name + "/" + file,
                 bm_decompress, path, codec.c, codec.d);
+            if (codec.real_time) {
+                c->UseRealTime();
+                d->UseRealTime();
+            }
         }
     }
 
