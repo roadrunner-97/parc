@@ -12,7 +12,13 @@ trailer, stream hash; codec in `src/codec/` (huffman/lz/block/frame);
 unit + property roundtrip suites, exhaustive truncation/byte-mutation
 corruption tests, golden fixtures in `tests/golden/`, libFuzzer targets
 (`fuzz/`, `fuzz` preset, smoke-run in CTest); parc-0 wired into the corpus
-benchmark. Next: Phase 4.
+benchmark. First fuzz campaign (2026-07-10, 3.5 h/target, coverage-guided):
+clean — 5.5M decode + 4.6M roundtrip execs, zero crashes/leaks/hangs.
+First corpus numbers (single-threaded, see `bench/results/`): ratio sits
+between lz4 and zlib-6 (e.g. enwik8 0.403 vs lz4 0.573 / zlib 0.365 /
+zstd-3 0.354); compression 180–550 MB/s (5–8x zlib-6); decompression
+90–390 MB/s is the known gap — bit-serial Huffman decode, addressed by
+table-based decode + FSE in Phase 5. Next: Phase 4.
 
 Phases are ordered so that measurement exists before the codec does, and
 correctness is locked in before performance work starts. Each phase ends green:
