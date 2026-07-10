@@ -68,6 +68,8 @@ static void usage(FILE *to)
 
 static int parse_size(const char *s, size_t *out)
 {
+    if (*s < '0' || *s > '9') /* strtoull would accept "-5" by wrapping */
+        return -1;
     char *end = NULL;
     errno = 0;
     unsigned long long v = strtoull(s, &end, 10);
@@ -379,6 +381,22 @@ static void print_json(const struct report *r, const struct options *opt,
     puts("  }");
 }
 
+/* RFC 4180 quoting for names containing separators or quotes. */
+static void csv_name(const char *s)
+{
+    if (strpbrk(s, ",\"\n\r") == NULL) {
+        fputs(s, stdout);
+        return;
+    }
+    putchar('"');
+    for (; *s; ++s) {
+        if (*s == '"')
+            putchar('"');
+        putchar(*s);
+    }
+    putchar('"');
+}
+
 static void csv_num(double v, const char *trail)
 {
     if (isnan(v))
@@ -400,12 +418,14 @@ static void print_csv(const struct report *r, const struct options *opt)
 {
     if (opt->profile_window > 0) {
         /* one row per window, for plotting */
-        for (size_t i = 0; i < r->profile_n; ++i)
-            printf("%s,%zu,%.6g\n", r->name, i * opt->profile_stride,
-                   r->profile[i]);
+        for (size_t i = 0; i < r->profile_n; ++i) {
+            csv_name(r->name);
+            printf(",%zu,%.6g\n", i * opt->profile_stride, r->profile[i]);
+        }
         return;
     }
-    printf("%s,%llu,", r->name, (unsigned long long)r->bytes);
+    csv_name(r->name);
+    printf(",%llu,", (unsigned long long)r->bytes);
     csv_num(r->o0, ",");
     csv_num(r->o1, ",");
     csv_num(r->min_entropy, ",");

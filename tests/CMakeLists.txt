@@ -46,3 +46,19 @@ add_test(NAME cli_parcent_stdin_matches_file
         $<TARGET_FILE:parcent> -c < cli_s.bin | cut -d, -f2-10 > cli_p.csv && \
         diff cli_f.csv cli_p.csv"
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
+# Differential test against ent(1): semantic diff of every shared statistic
+# over a synthetic suite of edge-case inputs. Registered only when ent and a
+# Python interpreter are available.
+find_program(ENT_EXECUTABLE ent)
+find_package(Python3 COMPONENTS Interpreter)
+if(ENT_EXECUTABLE AND Python3_Interpreter_FOUND)
+    add_test(NAME cli_parcent_ent_diff
+        COMMAND Python3::Interpreter
+            ${CMAKE_SOURCE_DIR}/tools/parcent/ent-diff.py
+            --parcent $<TARGET_FILE:parcent>
+            --ent ${ENT_EXECUTABLE}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+else()
+    message(STATUS "ent or python3 not found; skipping cli_parcent_ent_diff")
+endif()
