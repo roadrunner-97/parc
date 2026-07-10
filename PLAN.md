@@ -31,8 +31,11 @@ reference, many-block stress, threads > blocks, empty input, MT corruption
 and full truncation sweeps); whole matrix green incl. TSan. enwik8 spot
 check (24-core): 0.54 s → 0.055 s compress, 0.56 s → 0.056 s decompress
 at T=16 (~10x, ~1.8 GB/s both ways, saturating ~T=16); bench harness
-gained parc-0-t{2,4,8,16} entries to track scaling per commit. Next:
-Phase 5.
+gained parc-0-t{2,4,8,16} entries (wall-clock timed) to track scaling per
+commit. First archived MT run (`bench/results/92cee24.json`, in-memory
+harness incl. per-call thread spawn): enwik8 t16 compress 1205 MiB/s
+(6.9x), decompress 768 MiB/s (5.2x); near-linear to t4, tapering beyond
+t8. Next: Phase 5.
 
 Phases are ordered so that measurement exists before the codec does, and
 correctness is locked in before performance work starts. Each phase ends green:
