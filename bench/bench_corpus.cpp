@@ -13,8 +13,12 @@
 #include <zlib.h>
 #include <zstd.h>
 
+#include "parc/parc.h"
+
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <stdexcept>
@@ -119,6 +123,41 @@ void zstd_decompress(const std::vector<uint8_t> &comp, size_t comp_size,
         throw std::runtime_error("zstd decompress failed");
 }
 
+// parc's v0 API is stdio streams; fmemopen/open_memstream adapt it to the
+// whole-buffer shape. The memstream copy is billed to parc — acceptable
+// noise until a memory API lands (Phase 5).
+size_t parc0_compress(const std::vector<uint8_t> &in,
+                      std::vector<uint8_t> &out) {
+    FILE *fin = fmemopen(const_cast<uint8_t *>(in.data()), in.size(), "rb");
+    char *buf = nullptr;
+    size_t len = 0;
+    FILE *fout = open_memstream(&buf, &len);
+    parc_copts opts = {0};
+    if (!fin || !fout ||
+        parc_compress_stream(fin, fout, &opts, nullptr) != PARC_OK)
+        throw std::runtime_error("parc compress failed");
+    fclose(fin);
+    fclose(fout);
+    out.assign(buf, buf + len);
+    free(buf);
+    return len;
+}
+
+void parc0_decompress(const std::vector<uint8_t> &comp, size_t comp_size,
+                      std::vector<uint8_t> &out, size_t orig_size) {
+    FILE *fin = fmemopen(const_cast<uint8_t *>(comp.data()), comp_size, "rb");
+    char *buf = nullptr;
+    size_t len = 0;
+    FILE *fout = open_memstream(&buf, &len);
+    if (!fin || !fout || parc_decompress_stream(fin, fout, nullptr) != PARC_OK)
+        throw std::runtime_error("parc decompress failed");
+    fclose(fin);
+    fclose(fout);
+    if (len != orig_size) throw std::runtime_error("parc size mismatch");
+    memcpy(out.data(), buf, len);
+    free(buf);
+}
+
 using compress_fn = size_t (*)(const std::vector<uint8_t> &,
                                std::vector<uint8_t> &);
 using decompress_fn = void (*)(const std::vector<uint8_t> &, size_t,
@@ -165,6 +204,7 @@ const Codec kCodecs[] = {
     {"zlib-6", zlib_compress, zlib_decompress},
     {"lz4", lz4_compress, lz4_decompress},
     {"zstd-3", zstd_compress, zstd_decompress},
+    {"parc-0", parc0_compress, parc0_decompress},
 };
 
 }  // namespace

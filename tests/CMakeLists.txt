@@ -8,9 +8,14 @@ FetchContent_MakeAvailable(googletest)
 
 add_executable(parc_util_tests
     test_bitstream.cpp
+    test_block.cpp
     test_buf.cpp
     test_err.cpp
+    test_frame.cpp
     test_gen.cpp
+    test_golden.cpp
+    test_huffman.cpp
+    test_lz.cpp
     test_rng.cpp
     test_stats.cpp
     test_xxh64.cpp
@@ -20,6 +25,8 @@ target_include_directories(parc_util_tests
     PRIVATE ${CMAKE_SOURCE_DIR}/src
 )
 target_compile_options(parc_util_tests PRIVATE -Wall -Wextra -Werror)
+target_compile_definitions(parc_util_tests
+    PRIVATE GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/golden")
 
 include(GoogleTest)
 gtest_discover_tests(parc_util_tests)
@@ -45,6 +52,35 @@ add_test(NAME cli_parcent_stdin_matches_file
         $<TARGET_FILE:parcent> -c cli_s.bin | cut -d, -f2-10 > cli_f.csv && \
         $<TARGET_FILE:parcent> -c < cli_s.bin | cut -d, -f2-10 > cli_p.csv && \
         diff cli_f.csv cli_p.csv"
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
+# parc CLI end-to-end: file and pipe roundtrips, verify, and guaranteed-
+# corrupt inputs (truncation and appended garbage) exiting nonzero.
+add_test(NAME cli_parc_file_roundtrip
+    COMMAND bash -c "\
+        $<TARGET_FILE:parcgen> -s 12 -n 5M -o pz_in.bin text && \
+        $<TARGET_FILE:parc_cli> c pz_in.bin -o pz.parc && \
+        $<TARGET_FILE:parc_cli> d pz.parc -o pz_out.bin && \
+        cmp pz_in.bin pz_out.bin && \
+        $<TARGET_FILE:parc_cli> t pz.parc"
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+add_test(NAME cli_parc_pipe_roundtrip
+    COMMAND bash -c "\
+        set -o pipefail && \
+        $<TARGET_FILE:parcgen> -s 13 -n 3M -o pz_p.bin json-log && \
+        $<TARGET_FILE:parc_cli> c -b 16 < pz_p.bin | \
+        $<TARGET_FILE:parc_cli> d > pz_p.out && \
+        cmp pz_p.bin pz_p.out"
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+add_test(NAME cli_parc_rejects_corrupt
+    COMMAND bash -c "\
+        $<TARGET_FILE:parcgen> -s 14 -n 100K -o pz_c.bin text && \
+        $<TARGET_FILE:parc_cli> c pz_c.bin -o pz_c.parc && \
+        head -c -1 pz_c.parc > pz_trunc.parc && \
+        ! $<TARGET_FILE:parc_cli> t pz_trunc.parc && \
+        cat pz_c.parc <(printf x) > pz_tail.parc && \
+        ! $<TARGET_FILE:parc_cli> t pz_tail.parc && \
+        ! $<TARGET_FILE:parc_cli> d pz_trunc.parc -o /dev/null"
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
 # Differential test against ent(1): semantic diff of every shared statistic

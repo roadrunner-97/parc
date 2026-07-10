@@ -1,13 +1,18 @@
 # parc — implementation plan
 
-**Status (2026-07-10):** Phase 1 complete. Phase 2 complete: stats core
+**Status (2026-07-10):** Phases 1–3 complete. Phase 2 delivered stats core
 (+ merge, LZ probe), parcgen generators + CLI, parcent CLI (ent-validated,
-multithreaded), corpus fetcher + manifest, benchmark harness with
-zlib/lz4/zstd baselines archived in `bench/results/`. ent validation is now
-a standing differential test: `tools/parcent/ent-diff.py` diffs parcent
-against `ent` semantically (shared stats + thread/stream invariance) over a
-synthetic edge-case suite, wired into CTest as `cli_parcent_ent_diff` when
-`ent` is installed. Next: Phase 3.
+multithreaded, with `tools/parcent/ent-diff.py` as a standing CTest
+differential test against `ent`), corpus fetcher + manifest, benchmark
+harness with zlib/lz4/zstd baselines archived in `bench/results/`.
+Phase 3 delivered format v0 (`docs/FORMAT.md`, normative): stored + packed
+(greedy hash-table LZ + canonical Huffman) blocks, per-block xxh64, index
+trailer, stream hash; codec in `src/codec/` (huffman/lz/block/frame);
+`parc` CLI (compress/decompress/verify, stdin/stdout); correctness rig:
+unit + property roundtrip suites, exhaustive truncation/byte-mutation
+corruption tests, golden fixtures in `tests/golden/`, libFuzzer targets
+(`fuzz/`, `fuzz` preset, smoke-run in CTest); parc-0 wired into the corpus
+benchmark. Next: Phase 4.
 
 Phases are ordered so that measurement exists before the codec does, and
 correctness is locked in before performance work starts. Each phase ends green:

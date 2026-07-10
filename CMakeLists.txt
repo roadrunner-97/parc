@@ -9,6 +9,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_library(parc STATIC
+    src/codec/block.c
+    src/codec/frame.c
+    src/codec/huffman.c
+    src/codec/lz.c
     src/stat/stats.c
     src/util/bitstream.c
     src/util/buf.c
@@ -23,6 +27,7 @@ target_include_directories(parc
 target_compile_options(parc PRIVATE -Wall -Wextra -Wconversion -Werror)
 target_link_libraries(parc PUBLIC m)
 
+add_subdirectory(tools/parc)
 add_subdirectory(tools/parcgen)
 add_subdirectory(tools/parcent)
 
@@ -34,4 +39,10 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
     add_subdirectory(tests)
+endif()
+
+# after include(CTest) so the fuzz smoke runs register with CTest
+option(PARC_FUZZ "Build libFuzzer targets (needs clang)" OFF)
+if(PARC_FUZZ)
+    add_subdirectory(fuzz)
 endif()
