@@ -1,5 +1,5 @@
 /* parc — CLI over the parc codec: compress, decompress, verify.
- * Format v0 per docs/FORMAT.md; files or stdin/stdout. */
+ * Format v0/v1 per docs/FORMAT.md; files or stdin/stdout. */
 #define _POSIX_C_SOURCE 200809L
 
 #include <errno.h>
@@ -29,6 +29,8 @@ static void usage(FILE *to)
         "                     N in 12..24 (default 20 = 1 MiB)\n"
         "  -L, --level N      compression level N in 1..9 (default 3);\n"
         "                     higher is smaller but slower\n"
+        "  -f, --format N     wire format N in 0..1 (default 1); 0 is the\n"
+        "                     legacy Huffman format. Any parc reads either.\n"
         "  -T, --threads N    use N worker threads (0 = one per CPU;\n"
         "                     default 1)\n"
         "  -o, --out FILE     write to FILE instead of stdout\n"
@@ -67,7 +69,7 @@ int main(int argc, char **argv)
 {
     enum { CMD_NONE, CMD_C, CMD_D, CMD_T } cmd = CMD_NONE;
     const char *in_path = NULL, *out_path = NULL;
-    parc_copts copts = {0, 0, 0};
+    parc_copts copts = {0, 0, 0, 0};
     unsigned threads = 1;
     int verbose = 0;
 
@@ -92,6 +94,13 @@ int main(int argc, char **argv)
                         PARC_LEVEL_MIN, PARC_LEVEL_MAX);
                 return 2;
             }
+        } else if (strcmp(a, "-f") == 0 || strcmp(a, "--format") == 0) {
+            unsigned wv;
+            if (++i >= argc || parse_uint(argv[i], &wv) != 0 || wv > 1) {
+                fputs("parc: -f needs a wire format in 0..1\n", stderr);
+                return 2;
+            }
+            copts.format = wv == 0 ? PARC_FORMAT_V0 : PARC_FORMAT_V1;
         } else if (strcmp(a, "-T") == 0 || strcmp(a, "--threads") == 0) {
             if (++i >= argc || parse_uint(argv[i], &threads) != 0 ||
                 threads > PARC_THREADS_MAX) {
@@ -136,6 +145,10 @@ int main(int argc, char **argv)
     }
     if (cmd != CMD_C && copts.level != 0) {
         fputs("parc: -L only applies to compress\n", stderr);
+        return 2;
+    }
+    if (cmd != CMD_C && copts.format != 0) {
+        fputs("parc: -f only applies to compress\n", stderr);
         return 2;
     }
     if (cmd == CMD_T && out_path != NULL) {

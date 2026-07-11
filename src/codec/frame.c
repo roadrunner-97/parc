@@ -10,14 +10,14 @@
 
 /* ---- header and trailer, shared with frame_mt.c ---- */
 
-parc_err parc_frame_write_header(FILE *out, unsigned bl)
+parc_err parc_frame_write_header(FILE *out, unsigned bl, unsigned version)
 {
-    uint8_t hdr[8] = {FRAME_MAGIC[0], FRAME_MAGIC[1], FRAME_MAGIC[2],
-                      FRAME_MAGIC[3], FRAME_VERSION, 0, (uint8_t)bl, 0};
+    uint8_t hdr[8] = {FRAME_MAGIC[0], FRAME_MAGIC[1],  FRAME_MAGIC[2],
+                      FRAME_MAGIC[3], (uint8_t)version, 0, (uint8_t)bl, 0};
     return write_all(out, hdr, sizeof hdr);
 }
 
-parc_err parc_frame_read_header(FILE *in, unsigned *bl)
+parc_err parc_frame_read_header(FILE *in, unsigned *bl, unsigned *version)
 {
     uint8_t hdr[8];
     parc_err err = read_exact(in, hdr, sizeof hdr);
@@ -25,12 +25,27 @@ parc_err parc_frame_read_header(FILE *in, unsigned *bl)
         return err;
     if (memcmp(hdr, FRAME_MAGIC, 4) != 0)
         return PARC_ERR_CORRUPT;
-    if (hdr[4] != FRAME_VERSION || hdr[5] != 0)
+    if (hdr[4] > FRAME_VERSION_MAX || hdr[5] != 0)
         return PARC_ERR_VERSION; /* unknown version or flags */
+    *version = hdr[4];
     *bl = hdr[6];
     if (*bl < BLOCK_LOG_MIN || *bl > BLOCK_LOG_MAX || hdr[7] != 0)
         return PARC_ERR_CORRUPT;
     return PARC_OK;
+}
+
+/* Map a parc_copts.format request to a wire version, or -1 if invalid. */
+static int wire_version(unsigned format)
+{
+    switch (format) {
+    case PARC_FORMAT_DEFAULT:
+    case PARC_FORMAT_V1:
+        return FRAME_VERSION_V1;
+    case PARC_FORMAT_V0:
+        return FRAME_VERSION_V0;
+    default:
+        return -1;
+    }
 }
 
 parc_err parc_frame_write_trailer(FILE *out, const parc_buf *index,
@@ -104,8 +119,12 @@ parc_err parc_compress_stream(FILE *in, FILE *out, const parc_copts *opts,
     unsigned level = opts && opts->level ? opts->level : PARC_LEVEL_DEFAULT;
     if (level > PARC_LEVEL_MAX)
         return PARC_ERR_ARG;
+    int version = wire_version(opts ? opts->format : PARC_FORMAT_DEFAULT);
+    if (version < 0)
+        return PARC_ERR_ARG;
     if (threads > 1)
-        return parc_frame_compress_mt(in, out, bl, threads, level, info);
+        return parc_frame_compress_mt(in, out, bl, threads, level,
+                                      (unsigned)version, info);
     size_t bs = (size_t)1 << bl;
 
     parc_err err = PARC_ERR_NOMEM;
@@ -114,10 +133,11 @@ parc_err parc_compress_stream(FILE *in, FILE *out, const parc_copts *opts,
     parc_blk_cctx cx = {0};
     parc_buf index;
     parc_buf_init(&index);
-    if (!raw || !payload || parc_blk_cctx_init(&cx, bs, level) != PARC_OK)
+    if (!raw || !payload ||
+        parc_blk_cctx_init(&cx, bs, level, (unsigned)version) != PARC_OK)
         goto done;
 
-    err = parc_frame_write_header(out, bl);
+    err = parc_frame_write_header(out, bl, (unsigned)version);
     if (err)
         goto done;
 
@@ -196,17 +216,23 @@ parc_err parc_decompress_stream(FILE *in, FILE *out, const parc_dopts *opts,
     if (threads > 1)
         return parc_frame_decompress_mt(in, out, threads, info);
 
-    unsigned bl;
-    parc_err err = parc_frame_read_header(in, &bl);
+    unsigned bl, version;
+    parc_err err = parc_frame_read_header(in, &bl, &version);
     if (err)
         return err;
     size_t bs = (size_t)1 << bl;
 
     uint8_t *cbuf = malloc(bs);
     uint8_t *raw = malloc(bs);
+    parc_blk_dctx dx = {0}; /* v1 scratch; allocated only for version 1 */
     parc_buf seen; /* index entries as read from the blocks, wire encoding */
     parc_buf_init(&seen);
     if (!cbuf || !raw) {
+        err = PARC_ERR_NOMEM;
+        goto done;
+    }
+    if (version == FRAME_VERSION_V1 &&
+        parc_blk_dctx_init(&dx, bs) != PARC_OK) {
         err = PARC_ERR_NOMEM;
         goto done;
     }
@@ -246,7 +272,8 @@ parc_err parc_decompress_stream(FILE *in, FILE *out, const parc_dopts *opts,
             goto done;
         const uint8_t *body = cbuf;
         if (type == PARC_BLK_PACKED) {
-            err = parc_blk_decompress(cbuf, comp_len, raw, raw_len);
+            err = parc_blk_decompress(&dx, cbuf, comp_len, raw, raw_len,
+                                      version);
             if (err)
                 goto done;
             body = raw;
@@ -296,6 +323,7 @@ parc_err parc_decompress_stream(FILE *in, FILE *out, const parc_dopts *opts,
 done:
     free(cbuf);
     free(raw);
+    parc_blk_dctx_free(&dx);
     parc_buf_free(&seen);
     return err;
 }

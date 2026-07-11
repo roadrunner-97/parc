@@ -24,12 +24,28 @@ std::vector<uint8_t> gen(parc_err (*g)(parc_rng *, size_t, parc_buf *),
     return v;
 }
 
+// Decode a packed payload in the given wire version, allocating the v1
+// decode scratch as needed. raw_len may differ from any real block (negative
+// tests), so the dctx is sized to it.
+parc_err blk_decode(const uint8_t *comp, uint32_t clen, uint8_t *out,
+                    uint32_t raw_len, unsigned version) {
+    if (version == 0)
+        return parc_blk_decompress(nullptr, comp, clen, out, raw_len, 0);
+    parc_blk_dctx dx;
+    size_t mb = raw_len ? raw_len : 1;
+    EXPECT_EQ(parc_blk_dctx_init(&dx, mb), PARC_OK);
+    parc_err err = parc_blk_decompress(&dx, comp, clen, out, raw_len, 1);
+    parc_blk_dctx_free(&dx);
+    return err;
+}
+
 // Compress one block; if packed, decompress and compare. Returns the type.
-int roundtrip(const std::vector<uint8_t> &in,
-              unsigned level = PARC_LEVEL_DEFAULT) {
+int roundtrip(const std::vector<uint8_t> &in, unsigned level = PARC_LEVEL_DEFAULT,
+              unsigned version = 1) {
     parc_blk_cctx cx;
-    EXPECT_EQ(parc_blk_cctx_init(&cx, in.size() ? in.size() : 1, level),
-              PARC_OK);
+    EXPECT_EQ(
+        parc_blk_cctx_init(&cx, in.size() ? in.size() : 1, level, version),
+        PARC_OK);
     std::vector<uint8_t> comp(in.size());
     uint32_t clen = 0;
     int type = parc_blk_compress(&cx, in.data(),
@@ -44,8 +60,8 @@ int roundtrip(const std::vector<uint8_t> &in,
     EXPECT_GE(clen, 1u);
     EXPECT_LT(clen, in.size());
     std::vector<uint8_t> out(in.size(), 0xCC);
-    EXPECT_EQ(parc_blk_decompress(comp.data(), clen, out.data(),
-                                  static_cast<uint32_t>(in.size())),
+    EXPECT_EQ(blk_decode(comp.data(), clen, out.data(),
+                         static_cast<uint32_t>(in.size()), version),
               PARC_OK);
     EXPECT_EQ(out, in);
     return type;
@@ -55,13 +71,15 @@ int roundtrip(const std::vector<uint8_t> &in,
 struct Packed {
     std::vector<uint8_t> raw;
     std::vector<uint8_t> comp;
+    unsigned version;
 };
 
-Packed make_packed() {
+Packed make_packed(unsigned version = 1) {
     Packed p;
+    p.version = version;
     p.raw = gen(parc_gen_text, 7, 8192);
     parc_blk_cctx cx;
-    EXPECT_EQ(parc_blk_cctx_init(&cx, p.raw.size(), PARC_LEVEL_DEFAULT),
+    EXPECT_EQ(parc_blk_cctx_init(&cx, p.raw.size(), PARC_LEVEL_DEFAULT, version),
               PARC_OK);
     p.comp.resize(p.raw.size());
     uint32_t clen = 0;
@@ -100,13 +118,15 @@ TEST(Block, BoundarySizesRoundtrip) {
 }
 
 TEST(Block, AllLevelsRoundtrip) {
-    // Every level must produce a decoder-valid block for every input; higher
-    // levels only change which matches are found, never correctness.
-    for (unsigned lvl = PARC_LEVEL_MIN; lvl <= PARC_LEVEL_MAX; ++lvl)
-        for (auto g : {parc_gen_random, parc_gen_text, parc_gen_json_log})
-            for (size_t n : {size_t{1}, size_t{4}, size_t{5}, size_t{63},
-                             size_t{4096}, size_t{4097}, size_t{65536}})
-                roundtrip(gen(g, 100 + n, n), lvl);  // asserts equality
+    // Every level must produce a decoder-valid block for every input in both
+    // wire versions; level only changes which matches are found, version only
+    // the entropy stage — never correctness.
+    for (unsigned version : {0u, 1u})
+        for (unsigned lvl = PARC_LEVEL_MIN; lvl <= PARC_LEVEL_MAX; ++lvl)
+            for (auto g : {parc_gen_random, parc_gen_text, parc_gen_json_log})
+                for (size_t n : {size_t{1}, size_t{4}, size_t{5}, size_t{63},
+                                 size_t{4096}, size_t{4097}, size_t{65536}})
+                    roundtrip(gen(g, 100 + n, n), lvl, version);
 }
 
 TEST(Block, HigherLevelsNeverBeatWorseThanGreedy) {
@@ -115,7 +135,7 @@ TEST(Block, HigherLevelsNeverBeatWorseThanGreedy) {
     auto in = gen(parc_gen_text, 55, 200000);
     auto packed_len = [&](unsigned level) -> uint32_t {
         parc_blk_cctx cx;
-        EXPECT_EQ(parc_blk_cctx_init(&cx, in.size(), level), PARC_OK);
+        EXPECT_EQ(parc_blk_cctx_init(&cx, in.size(), level, 1), PARC_OK);
         std::vector<uint8_t> comp(in.size());
         uint32_t clen = 0;
         EXPECT_EQ(parc_blk_compress(&cx, in.data(),
@@ -139,58 +159,92 @@ TEST(Block, MaxDistanceAndLongMatch) {
     EXPECT_EQ(roundtrip(in), PARC_BLK_PACKED);
 }
 
+TEST(Block, RepeatOffsetPatternRoundtrips) {
+    // Strongly periodic data makes one distance recur, driving the v1
+    // repeat-offset (REP0) path; both versions must roundtrip and pack.
+    parc_rng rng;
+    parc_rng_seed(&rng, 0x5EA1);
+    for (size_t period : {size_t{7}, size_t{32}, size_t{257}}) {
+        std::vector<uint8_t> unit(period);
+        for (auto &b : unit) b = static_cast<uint8_t>(parc_rng_range(&rng, 256));
+        std::vector<uint8_t> in(200000);
+        for (size_t i = 0; i < in.size(); ++i) in[i] = unit[i % period];
+        for (unsigned version : {0u, 1u})
+            EXPECT_EQ(roundtrip(in, PARC_LEVEL_DEFAULT, version),
+                      PARC_BLK_PACKED)
+                << "period " << period << " version " << version;
+    }
+    // Two alternating distances exercise REP1/REP2 and the MTF shuffle.
+    std::vector<uint8_t> a(64), b(48);
+    for (auto &x : a) x = static_cast<uint8_t>(parc_rng_range(&rng, 256));
+    for (auto &x : b) x = static_cast<uint8_t>(parc_rng_range(&rng, 256));
+    std::vector<uint8_t> mix;
+    for (int i = 0; i < 1500; ++i) {
+        mix.insert(mix.end(), a.begin(), a.end());
+        mix.insert(mix.end(), b.begin(), b.end());
+    }
+    EXPECT_EQ(roundtrip(mix, PARC_LEVEL_DEFAULT, 1), PARC_BLK_PACKED);
+}
+
 TEST(BlockDecode, RejectsTruncatedPayload) {
-    Packed p = make_packed();
-    std::vector<uint8_t> out(p.raw.size());
-    for (size_t cut : {size_t{0}, size_t{1}, size_t{100},
-                       p.comp.size() - 1})
-        EXPECT_EQ(parc_blk_decompress(p.comp.data(),
-                                      static_cast<uint32_t>(cut), out.data(),
-                                      static_cast<uint32_t>(p.raw.size())),
-                  PARC_ERR_CORRUPT)
-            << "cut " << cut;
+    for (unsigned version : {0u, 1u}) {
+        Packed p = make_packed(version);
+        std::vector<uint8_t> out(p.raw.size());
+        for (size_t cut : {size_t{0}, size_t{1}, size_t{100},
+                           p.comp.size() - 1})
+            EXPECT_EQ(blk_decode(p.comp.data(), static_cast<uint32_t>(cut),
+                                 out.data(),
+                                 static_cast<uint32_t>(p.raw.size()), version),
+                      PARC_ERR_CORRUPT)
+                << "version " << version << " cut " << cut;
+    }
 }
 
 TEST(BlockDecode, RejectsNonMinimalCompLenAndPadding) {
-    Packed p = make_packed();
-    std::vector<uint8_t> out(p.raw.size());
-    // extra byte appended: comp_len no longer minimal
-    std::vector<uint8_t> longer = p.comp;
-    longer.push_back(0);
-    EXPECT_EQ(parc_blk_decompress(longer.data(),
-                                  static_cast<uint32_t>(longer.size()),
-                                  out.data(),
-                                  static_cast<uint32_t>(p.raw.size())),
-              PARC_ERR_CORRUPT);
+    for (unsigned version : {0u, 1u}) {
+        Packed p = make_packed(version);
+        std::vector<uint8_t> out(p.raw.size());
+        // extra byte appended: comp_len no longer minimal
+        std::vector<uint8_t> longer = p.comp;
+        longer.push_back(0);
+        EXPECT_EQ(blk_decode(longer.data(),
+                             static_cast<uint32_t>(longer.size()), out.data(),
+                             static_cast<uint32_t>(p.raw.size()), version),
+                  PARC_ERR_CORRUPT)
+            << "version " << version;
+    }
 }
 
 TEST(BlockDecode, RejectsWrongRawLen) {
-    Packed p = make_packed();
-    std::vector<uint8_t> out(p.raw.size() + 8);
-    for (long d : {-3L, -1L, 1L, 3L}) {
-        uint32_t raw_len = static_cast<uint32_t>(
-            static_cast<long>(p.raw.size()) + d);
-        EXPECT_EQ(parc_blk_decompress(p.comp.data(),
-                                      static_cast<uint32_t>(p.comp.size()),
-                                      out.data(), raw_len),
-                  PARC_ERR_CORRUPT)
-            << "delta " << d;
+    for (unsigned version : {0u, 1u}) {
+        Packed p = make_packed(version);
+        std::vector<uint8_t> out(p.raw.size() + 8);
+        for (long d : {-3L, -1L, 1L, 3L}) {
+            uint32_t raw_len =
+                static_cast<uint32_t>(static_cast<long>(p.raw.size()) + d);
+            EXPECT_EQ(blk_decode(p.comp.data(),
+                                 static_cast<uint32_t>(p.comp.size()),
+                                 out.data(), raw_len, version),
+                      PARC_ERR_CORRUPT)
+                << "version " << version << " delta " << d;
+        }
     }
 }
 
 TEST(BlockDecode, SurvivesArbitraryGarbage) {
     // Any byte soup must yield a clean error or a successful decode of
     // exactly raw_len bytes (frame hashes catch wrong content) — never a
-    // crash or overrun (ASan enforces).
+    // crash or overrun (ASan enforces). Both decoders.
     parc_rng rng;
     parc_rng_seed(&rng, 0xBAD);
     std::vector<uint8_t> out(4096);
-    for (int iter = 0; iter < 2000; ++iter) {
-        size_t clen = 1 + parc_rng_range(&rng, 700);
-        std::vector<uint8_t> junk(clen);
-        for (auto &b : junk)
-            b = static_cast<uint8_t>(parc_rng_range(&rng, 256));
-        parc_blk_decompress(junk.data(), static_cast<uint32_t>(clen),
-                            out.data(), 4096);
-    }
+    for (unsigned version : {0u, 1u})
+        for (int iter = 0; iter < 2000; ++iter) {
+            size_t clen = 1 + parc_rng_range(&rng, 700);
+            std::vector<uint8_t> junk(clen);
+            for (auto &b : junk)
+                b = static_cast<uint8_t>(parc_rng_range(&rng, 256));
+            blk_decode(junk.data(), static_cast<uint32_t>(clen), out.data(),
+                       4096, version);
+        }
 }

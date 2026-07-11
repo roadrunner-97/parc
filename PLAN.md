@@ -64,8 +64,34 @@ Decoder-internal, no format change: golden fixtures decode bit-identically.
 Correctness rides the rig plus a long-code fallback test and a peek unit
 test; 87k corrupt-input decode-fuzz execs clean; full matrix green incl.
 TSan. Single-threaded decode is ~1.5x faster (enwik8 173 -> 261 MiB/s,
-webster 205 -> 311, xml 543 -> 820). Next Phase 5 levers: FSE/tANS +
-repeat-offset codes (a v1 format bump), then wider/faster decode.
+webster 205 -> 311, xml 543 -> 820).
+Then the FSE entropy stage + repeat-offset codes landed as **format version 1**
+(the first wire bump; `docs/FORMAT.md` gained a normative §3 and §5). v1 codes a
+zstd-style sequence model: block literals form one FSE stream; each match is a
+`(litLen, matchLen, offset)` sequence with three more FSE streams; offsets carry
+repeat-offset codes over a 3-entry move-to-front cache (init {1,2,3}). New
+`src/codec/fse.c` is a self-contained table-driven ANS coder over `uint8`
+symbols (largest-remainder normalization, bucket-coded count tables); the
+encoder lays its groups down in decode order so decode is an ordinary forward
+`parc_br` walk (no backward reader). The entropy backend stays encapsulated in
+`block.c` (v0 Huffman and v1 FSE side by side, dispatched by version); a
+`parc_blk_dctx` holds v1 decode scratch, threaded through `frame.c`/`frame_mt.c`
+(per-thread on the MT path). Decoder accepts both versions, dispatching on the
+header byte; encoder picks via `parc_copts.format` (default v1) / CLI `-f`; v0
+frames stay byte-frozen and MT frames bit-identical for both versions. Correctness
+rides the rig plus a new `test_fse.cpp`, per-version block/frame/MT sweeps, v1
+golden fixtures (`tests/golden/*-v1.parc`), the roundtrip fuzzer now fuzzing
+format too and the decode fuzzer seeded with v1 frames; full matrix green incl.
+TSan, fuzz campaign clean. On the real corpus v1 beats v0 everywhere at L6:
+enwik8 0.3387 -> 0.3368, webster -0.4%, xml -1.9%, mozilla -3.2%, nci -3.5%,
+samba -3.7%; on random-literal synthetic data the two are ~parity (the sequence
+model's litLen overhead roughly cancels the FSE/rep-offset gains when nothing
+recurs). FSE-over-Huffman on literals is inherently marginal (as zstd's
+Huffman-literals design implies); v1's real-data win comes from separate
+distributions + repeat offsets, and is the foundation for the matching work that
+makes the sequence model pay more. Bench gained `parc-1[-L*/-t*]` entries. Next
+Phase 5 levers: wider/faster decode, and richer matching (optimal parse, larger
+windows) to exploit the sequence model.
 
 Phases are ordered so that measurement exists before the codec does, and
 correctness is locked in before performance work starts. Each phase ends green:

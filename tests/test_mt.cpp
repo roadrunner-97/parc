@@ -44,10 +44,11 @@ std::vector<uint8_t> slurp(FILE *f) {
 
 std::vector<uint8_t> compress(const std::vector<uint8_t> &in,
                               unsigned block_log, unsigned threads,
-                              parc_info *fi = nullptr) {
+                              parc_info *fi = nullptr,
+                              unsigned format = PARC_FORMAT_DEFAULT) {
     FILE *fin = file_of(in);
     FILE *fout = tmpfile();
-    parc_copts opts = {block_log, threads, 0};
+    parc_copts opts = {block_log, threads, 0, format};
     EXPECT_EQ(parc_compress_stream(fin, fout, &opts, fi), PARC_OK);
     auto frame = slurp(fout);
     fclose(fin);
@@ -84,10 +85,11 @@ std::vector<uint8_t> gen(parc_err (*g)(parc_rng *, size_t, parc_buf *),
 }
 
 void expect_roundtrip(const std::vector<uint8_t> &in, unsigned block_log,
-                      unsigned cthreads, unsigned dthreads) {
+                      unsigned cthreads, unsigned dthreads,
+                      unsigned format = PARC_FORMAT_DEFAULT) {
     parc_info ci, di;
-    auto st = compress(in, block_log, 1, &ci);
-    auto mt = compress(in, block_log, cthreads, &di);
+    auto st = compress(in, block_log, 1, &ci, format);
+    auto mt = compress(in, block_log, cthreads, &di, format);
     ASSERT_EQ(mt, st) << "frame differs, T=" << cthreads;
     EXPECT_EQ(di.raw_bytes, ci.raw_bytes);
     EXPECT_EQ(di.frame_bytes, ci.frame_bytes);
@@ -125,6 +127,17 @@ TEST(Mt, RoundtripAllClassesAndBoundarySizes) {
             expect_roundtrip(in, 12, 2, 2);
         }
     }
+}
+
+TEST(Mt, V0FrameBitIdentical) {
+    // The legacy v0 format must still round-trip bit-identically across
+    // thread counts (default is now v1, so v0 needs its own coverage).
+    const unsigned hw = hw_threads();
+    for (size_t n : {size_t{0}, size_t{1}, size_t{8193}, size_t{100000}})
+        for (unsigned t : {2u, hw}) {
+            auto in = gen(parc_gen_text, 0xC0DE + n, n);
+            expect_roundtrip(in, 12, t, t, PARC_FORMAT_V0);
+        }
 }
 
 TEST(Mt, ThreadCountSweep) {
@@ -172,7 +185,7 @@ TEST(Mt, EmptyInput) {
 TEST(Mt, BadThreadCountRejected) {
     FILE *fin = file_of({});
     FILE *fout = tmpfile();
-    parc_copts copts = {12, PARC_THREADS_MAX + 1, 0};
+    parc_copts copts = {12, PARC_THREADS_MAX + 1, 0, PARC_FORMAT_DEFAULT};
     EXPECT_EQ(parc_compress_stream(fin, fout, &copts, nullptr), PARC_ERR_ARG);
     rewind(fin);
     parc_dopts dopts = {PARC_THREADS_MAX + 1};

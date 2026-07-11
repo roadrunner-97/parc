@@ -64,6 +64,7 @@ void expect_golden(const char *file, uint64_t seed, size_t n,
 
 }  // namespace
 
+// v0 frames (Huffman). These must decode identically forever.
 TEST(Golden, Text64k) { expect_golden("text-64k.parc", 1001, 65536,
                                       parc_gen_text); }
 TEST(Golden, JsonLog64k) { expect_golden("jsonlog-64k.parc", 1002, 65536,
@@ -74,5 +75,21 @@ TEST(Golden, Random16k) { expect_golden("random-16k.parc", 1003, 16384,
 TEST(Golden, Empty) {
     auto frame = read_file(GOLDEN_DIR "/empty.parc");
     ASSERT_EQ(frame.size(), 37u);
+    EXPECT_TRUE(decode(frame).empty());
+}
+
+// v1 frames (FSE sequence model + repeat offsets), same content/seeds. These
+// pin the v1 wire format; a decode change that breaks them is a format change.
+TEST(Golden, Text64kV1) { expect_golden("text-64k-v1.parc", 1001, 65536,
+                                        parc_gen_text); }
+TEST(Golden, JsonLog64kV1) { expect_golden("jsonlog-64k-v1.parc", 1002, 65536,
+                                           parc_gen_json_log); }
+TEST(Golden, Random16kV1) { expect_golden("random-16k-v1.parc", 1003, 16384,
+                                          parc_gen_random); }
+
+TEST(Golden, EmptyV1) {
+    auto frame = read_file(GOLDEN_DIR "/empty-v1.parc");
+    ASSERT_EQ(frame.size(), 37u);
+    EXPECT_EQ(frame[4], 1u); // v1 wire version
     EXPECT_TRUE(decode(frame).empty());
 }

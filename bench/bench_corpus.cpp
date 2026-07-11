@@ -129,13 +129,14 @@ void zstd_decompress(const std::vector<uint8_t> &comp, size_t comp_size,
 // noise until a memory API lands (Phase 5). threads = 1 is the
 // single-threaded reference path; >= 2 exercises the Phase 4 pipeline
 // (the parc-0-tN codec entries track scaling efficiency per commit).
-size_t parc0_compress_t(unsigned threads, const std::vector<uint8_t> &in,
-                        std::vector<uint8_t> &out) {
+size_t parc_compress_g(unsigned format, unsigned level, unsigned threads,
+                       const std::vector<uint8_t> &in,
+                       std::vector<uint8_t> &out) {
     FILE *fin = fmemopen(const_cast<uint8_t *>(in.data()), in.size(), "rb");
     char *buf = nullptr;
     size_t len = 0;
     FILE *fout = open_memstream(&buf, &len);
-    parc_copts opts = {0, threads, 0};
+    parc_copts opts = {0, threads, level, format};
     if (!fin || !fout ||
         parc_compress_stream(fin, fout, &opts, nullptr) != PARC_OK)
         throw std::runtime_error("parc compress failed");
@@ -144,6 +145,16 @@ size_t parc0_compress_t(unsigned threads, const std::vector<uint8_t> &in,
     out.assign(buf, buf + len);
     free(buf);
     return len;
+}
+
+size_t parc0_compress_t(unsigned threads, const std::vector<uint8_t> &in,
+                        std::vector<uint8_t> &out) {
+    return parc_compress_g(PARC_FORMAT_V0, 0, threads, in, out);
+}
+
+size_t parc1_compress_t(unsigned threads, const std::vector<uint8_t> &in,
+                        std::vector<uint8_t> &out) {
+    return parc_compress_g(PARC_FORMAT_V1, 0, threads, in, out);
 }
 
 void parc0_decompress_t(unsigned threads, const std::vector<uint8_t> &comp,
@@ -168,26 +179,26 @@ void parc0_decompress_t(unsigned threads, const std::vector<uint8_t> &comp,
 // level-independent, so the parc-0-LN entries reuse parc0_decompress).
 size_t parc0_compress_level(unsigned level, const std::vector<uint8_t> &in,
                             std::vector<uint8_t> &out) {
-    FILE *fin = fmemopen(const_cast<uint8_t *>(in.data()), in.size(), "rb");
-    char *buf = nullptr;
-    size_t len = 0;
-    FILE *fout = open_memstream(&buf, &len);
-    parc_copts opts = {0, 1, level};
-    if (!fin || !fout ||
-        parc_compress_stream(fin, fout, &opts, nullptr) != PARC_OK)
-        throw std::runtime_error("parc compress failed");
-    fclose(fin);
-    fclose(fout);
-    out.assign(buf, buf + len);
-    free(buf);
-    return len;
+    return parc_compress_g(PARC_FORMAT_V0, level, 1, in, out);
+}
+
+size_t parc1_compress_level(unsigned level, const std::vector<uint8_t> &in,
+                            std::vector<uint8_t> &out) {
+    return parc_compress_g(PARC_FORMAT_V1, level, 1, in, out);
 }
 
 size_t parc0_compress(const std::vector<uint8_t> &in,
                       std::vector<uint8_t> &out) {
-    return parc0_compress_t(1, in, out);
+    return parc_compress_g(PARC_FORMAT_V0, 0, 1, in, out);
 }
 
+size_t parc1_compress(const std::vector<uint8_t> &in,
+                      std::vector<uint8_t> &out) {
+    return parc_compress_g(PARC_FORMAT_V1, 0, 1, in, out);
+}
+
+// Decompression auto-detects the wire version from the frame header, so the
+// v0 decode adapters serve v1 frames too.
 void parc0_decompress(const std::vector<uint8_t> &comp, size_t comp_size,
                       std::vector<uint8_t> &out, size_t orig_size) {
     parc0_decompress_t(1, comp, comp_size, out, orig_size);
@@ -245,12 +256,16 @@ std::vector<Codec> make_codecs() {
         {"lz4", lz4_compress, lz4_decompress, false},
         {"zstd-3", zstd_compress, zstd_decompress, false},
         {"parc-0", parc0_compress, parc0_decompress, false},
+        {"parc-1", parc1_compress, parc0_decompress, false},
     };
-    // level sweep (parc-0 is the default level); ratio ladder per commit
+    // level sweep (parc-N is the default level); ratio ladder per commit
     for (unsigned L : {1u, 6u, 9u}) {
         using namespace std::placeholders;
         codecs.push_back({"parc-0-L" + std::to_string(L),
                           std::bind(parc0_compress_level, L, _1, _2),
+                          parc0_decompress, false});
+        codecs.push_back({"parc-1-L" + std::to_string(L),
+                          std::bind(parc1_compress_level, L, _1, _2),
                           parc0_decompress, false});
     }
     // thread-scaling sweep for the Phase 4 pipeline
@@ -258,6 +273,10 @@ std::vector<Codec> make_codecs() {
         using namespace std::placeholders;
         codecs.push_back({"parc-0-t" + std::to_string(t),
                           std::bind(parc0_compress_t, t, _1, _2),
+                          std::bind(parc0_decompress_t, t, _1, _2, _3, _4),
+                          true});
+        codecs.push_back({"parc-1-t" + std::to_string(t),
+                          std::bind(parc1_compress_t, t, _1, _2),
                           std::bind(parc0_decompress_t, t, _1, _2, _3, _4),
                           true});
     }

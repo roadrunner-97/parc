@@ -19,7 +19,9 @@ extern "C" {
 
 static const uint8_t FRAME_MAGIC[4] = {'p', 'A', 'r', 'c'};
 static const uint8_t END_MAGIC[4] = {'p', 'E', 'n', 'd'};
-#define FRAME_VERSION 0
+#define FRAME_VERSION_V0 0 /* Huffman over a flat token stream */
+#define FRAME_VERSION_V1 1 /* FSE sequence model + repeat offsets */
+#define FRAME_VERSION_MAX 1
 #define BLOCK_LOG_MIN 12
 #define BLOCK_LOG_MAX 24
 #define BLOCK_LOG_DEFAULT 20
@@ -99,11 +101,12 @@ static inline uint64_t trailer_len(uint32_t blocks)
     return TRAILER_FIXED_BYTES + (uint64_t)INDEX_ENTRY_BYTES * blocks;
 }
 
-/* Write the 8-byte frame header. bl must already be validated. */
-parc_err parc_frame_write_header(FILE *out, unsigned bl);
+/* Write the 8-byte frame header. bl and version must already be validated. */
+parc_err parc_frame_write_header(FILE *out, unsigned bl, unsigned version);
 
-/* Read and validate the 8-byte frame header, yielding block_log. */
-parc_err parc_frame_read_header(FILE *in, unsigned *bl);
+/* Read and validate the 8-byte frame header, yielding block_log and the wire
+ * version (0 or 1). */
+parc_err parc_frame_read_header(FILE *in, unsigned *bl, unsigned *version);
 
 /* Write end marker, index, and trailer, and flush. digest is the stream
  * hash of all content bytes. */
@@ -121,10 +124,10 @@ parc_err parc_frame_check_trailer(FILE *in, const parc_buf *seen,
                                   uint32_t blocks, uint64_t total_raw,
                                   uint64_t *want_hash);
 
-/* Multithreaded paths (frame_mt.c); threads >= 2, bl validated. */
+/* Multithreaded paths (frame_mt.c); threads >= 2, bl and version validated. */
 parc_err parc_frame_compress_mt(FILE *in, FILE *out, unsigned bl,
                                 unsigned threads, unsigned level,
-                                parc_info *info);
+                                unsigned version, parc_info *info);
 parc_err parc_frame_decompress_mt(FILE *in, FILE *out, unsigned threads,
                                   parc_info *info);
 

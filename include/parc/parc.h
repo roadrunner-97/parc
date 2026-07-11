@@ -20,10 +20,17 @@ extern "C" {
 #define PARC_THREADS_MAX 512
 
 /* Compression level range. Level selects match-search effort only; every
- * level produces a valid v0 frame that any decoder reads. */
+ * level produces a valid frame that any decoder reads. */
 #define PARC_LEVEL_MIN 1
 #define PARC_LEVEL_MAX 9
 #define PARC_LEVEL_DEFAULT 3
+
+/* Wire format selection (parc_copts.format). 0 requests the latest format;
+ * the explicit values force a specific wire version for tooling and
+ * cross-version tests. Any decoder reads either format. */
+#define PARC_FORMAT_DEFAULT 0
+#define PARC_FORMAT_V0 1 /* Huffman token stream */
+#define PARC_FORMAT_V1 2 /* FSE sequence model + repeat offsets (latest) */
 
 typedef struct parc_copts {
     /* log2 of the maximum block size: 0 for the default (20 → 1 MiB),
@@ -42,6 +49,10 @@ typedef struct parc_copts {
      * array, ~4x block size extra) for a better ratio at lower speed.
      * Out-of-range values are rejected with PARC_ERR_ARG. */
     unsigned level;
+    /* wire format: 0 (PARC_FORMAT_DEFAULT) for the latest, or an explicit
+     * PARC_FORMAT_V0 / PARC_FORMAT_V1. Out-of-range values are rejected with
+     * PARC_ERR_ARG. Every format decodes on any build. */
+    unsigned format;
 } parc_copts;
 
 typedef struct parc_dopts {

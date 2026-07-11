@@ -14,6 +14,7 @@ add_library(parc STATIC
     src/codec/block.c
     src/codec/frame.c
     src/codec/frame_mt.c
+    src/codec/fse.c
     src/codec/huffman.c
     src/codec/lz.c
     src/codec/mt.c

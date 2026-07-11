@@ -33,10 +33,11 @@ std::vector<uint8_t> slurp(FILE *f) {
 }
 
 std::vector<uint8_t> compress(const std::vector<uint8_t> &in,
-                              unsigned block_log, parc_info *fi = nullptr) {
+                              unsigned block_log, parc_info *fi = nullptr,
+                              unsigned format = PARC_FORMAT_DEFAULT) {
     FILE *fin = file_of(in);
     FILE *fout = tmpfile();
-    parc_copts opts = {block_log, 0, 0};
+    parc_copts opts = {block_log, 0, 0, format};
     EXPECT_EQ(parc_compress_stream(fin, fout, &opts, fi), PARC_OK);
     auto frame = slurp(fout);
     fclose(fin);
@@ -72,13 +73,14 @@ std::vector<uint8_t> gen(parc_err (*g)(parc_rng *, size_t, parc_buf *),
 
 // A small frame mixing packed and stored blocks, for the corruption suite:
 // text (packs) followed by random (stored) at 4 KiB blocks.
-std::vector<uint8_t> mixed_frame(std::vector<uint8_t> *content) {
+std::vector<uint8_t> mixed_frame(std::vector<uint8_t> *content,
+                                 unsigned format = PARC_FORMAT_V1) {
     auto text = gen(parc_gen_text, 21, 6000);
     auto rand = gen(parc_gen_random, 22, 3000);
     content->assign(text.begin(), text.end());
     content->insert(content->end(), rand.begin(), rand.end());
     parc_info fi;
-    auto frame = compress(*content, 12, &fi);
+    auto frame = compress(*content, 12, &fi, format);
     EXPECT_EQ(fi.blocks, 3u);
     EXPECT_GE(fi.stored_blocks, 1u);
     EXPECT_LE(fi.stored_blocks, 2u);
@@ -151,7 +153,7 @@ TEST(Frame, BadOptionsRejected) {
     FILE *fin = file_of({});
     FILE *fout = tmpfile();
     for (unsigned bl : {11u, 25u, 99u}) {
-        parc_copts opts = {bl, 0, 0};
+        parc_copts opts = {bl, 0, 0, PARC_FORMAT_DEFAULT};
         EXPECT_EQ(parc_compress_stream(fin, fout, &opts, nullptr),
                   PARC_ERR_ARG)
             << bl;
@@ -171,7 +173,7 @@ TEST(Frame, HeaderFieldValidation) {
             << "byte " << pos << " = " << int{val};
     };
     expect_hdr_err(0, 'q', PARC_ERR_CORRUPT);   // magic
-    expect_hdr_err(4, 1, PARC_ERR_VERSION);     // future version
+    expect_hdr_err(4, 2, PARC_ERR_VERSION);     // future version (0 and 1 valid)
     expect_hdr_err(5, 1, PARC_ERR_VERSION);     // unknown flag
     expect_hdr_err(6, 11, PARC_ERR_CORRUPT);    // block_log too small
     expect_hdr_err(6, 25, PARC_ERR_CORRUPT);    // block_log too large
@@ -215,34 +217,39 @@ TEST(Frame, ErrorTaxonomyExamples) {
 }
 
 TEST(Frame, EveryTruncationFailsCleanly) {
-    std::vector<uint8_t> content;
-    const auto frame = mixed_frame(&content);
-    for (size_t n = 0; n < frame.size(); ++n) {
-        std::vector<uint8_t> cut(frame.begin(), frame.begin() + (long)n);
-        parc_err e = decompress(cut, nullptr);
-        ASSERT_NE(e, PARC_OK) << "prefix of " << n << " bytes decoded";
-    }
-    // the empty frame too
-    const auto empty = compress({}, 12);
-    for (size_t n = 0; n < empty.size(); ++n) {
-        std::vector<uint8_t> cut(empty.begin(), empty.begin() + (long)n);
-        ASSERT_NE(decompress(cut, nullptr), PARC_OK) << n;
+    for (unsigned fmt : {PARC_FORMAT_V0, PARC_FORMAT_V1}) {
+        std::vector<uint8_t> content;
+        const auto frame = mixed_frame(&content, fmt);
+        for (size_t n = 0; n < frame.size(); ++n) {
+            std::vector<uint8_t> cut(frame.begin(), frame.begin() + (long)n);
+            parc_err e = decompress(cut, nullptr);
+            ASSERT_NE(e, PARC_OK)
+                << "fmt " << fmt << " prefix of " << n << " bytes decoded";
+        }
+        // the empty frame too
+        const auto empty = compress({}, 12, nullptr, fmt);
+        for (size_t n = 0; n < empty.size(); ++n) {
+            std::vector<uint8_t> cut(empty.begin(), empty.begin() + (long)n);
+            ASSERT_NE(decompress(cut, nullptr), PARC_OK) << "fmt " << fmt << n;
+        }
     }
 }
 
 TEST(Frame, EveryByteMutationFailsOrDecodesIdentically) {
-    std::vector<uint8_t> content;
-    const auto frame = mixed_frame(&content);
-    for (size_t pos = 0; pos < frame.size(); ++pos) {
-        for (uint8_t flip : {uint8_t{0x01}, uint8_t{0xFF}}) {
-            auto bad = frame;
-            bad[pos] ^= flip;
-            std::vector<uint8_t> out;
-            parc_err e = decompress(bad, &out);
-            if (e == PARC_OK) {
-                ASSERT_EQ(out, content)
-                    << "byte " << pos << " ^ " << int{flip}
-                    << " decoded to different content";
+    for (unsigned fmt : {PARC_FORMAT_V0, PARC_FORMAT_V1}) {
+        std::vector<uint8_t> content;
+        const auto frame = mixed_frame(&content, fmt);
+        for (size_t pos = 0; pos < frame.size(); ++pos) {
+            for (uint8_t flip : {uint8_t{0x01}, uint8_t{0xFF}}) {
+                auto bad = frame;
+                bad[pos] ^= flip;
+                std::vector<uint8_t> out;
+                parc_err e = decompress(bad, &out);
+                if (e == PARC_OK) {
+                    ASSERT_EQ(out, content)
+                        << "fmt " << fmt << " byte " << pos << " ^ "
+                        << int{flip} << " decoded to different content";
+                }
             }
         }
     }

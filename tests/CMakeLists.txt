@@ -12,6 +12,7 @@ add_executable(parc_util_tests
     test_buf.cpp
     test_err.cpp
     test_frame.cpp
+    test_fse.cpp
     test_gen.cpp
     test_golden.cpp
     test_huffman.cpp

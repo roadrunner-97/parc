@@ -21,6 +21,7 @@ typedef struct cmt_ctx {
     FILE *in, *out;
     size_t bs;
     unsigned level;
+    unsigned version;
     /* reader-owned */
     parc_xxh64_state sh; /* stream hash, over raw bytes in read order */
     uint64_t total_raw;
@@ -83,7 +84,7 @@ static parc_err cmt_wctx_init(void *vctx, void **wctx)
     parc_blk_cctx *cx = calloc(1, sizeof *cx);
     if (!cx)
         return PARC_ERR_NOMEM;
-    parc_err err = parc_blk_cctx_init(cx, c->bs, c->level);
+    parc_err err = parc_blk_cctx_init(cx, c->bs, c->level, c->version);
     if (err) {
         free(cx);
         return err;
@@ -102,7 +103,7 @@ static void cmt_wctx_free(void *wctx)
 
 parc_err parc_frame_compress_mt(FILE *in, FILE *out, unsigned bl,
                                 unsigned threads, unsigned level,
-                                parc_info *info)
+                                unsigned version, parc_info *info)
 {
     static const parc_mt_ops ops = {cmt_read, cmt_work, cmt_write,
                                     cmt_wctx_init, cmt_wctx_free};
@@ -111,11 +112,12 @@ parc_err parc_frame_compress_mt(FILE *in, FILE *out, unsigned bl,
     c.out = out;
     c.bs = (size_t)1 << bl;
     c.level = level;
+    c.version = version;
     c.offset = 8;
     parc_xxh64_init(&c.sh, 0);
     parc_buf_init(&c.index);
 
-    parc_err err = parc_frame_write_header(out, bl);
+    parc_err err = parc_frame_write_header(out, bl, version);
     if (!err)
         err = parc_mt_run(&ops, &c, threads, c.bs);
     if (!err)
@@ -136,6 +138,7 @@ parc_err parc_frame_compress_mt(FILE *in, FILE *out, unsigned bl,
 typedef struct dmt_ctx {
     FILE *in, *out; /* out NULL = verify only */
     size_t bs;
+    unsigned version;
     /* reader-owned */
     parc_buf seen; /* index entries as read from the blocks, wire encoding */
     uint64_t offset, total_raw;
@@ -189,12 +192,11 @@ static parc_err dmt_read(void *vctx, parc_mt_slot *s, int *eof)
 
 static parc_err dmt_work(void *vctx, void *wctx, parc_mt_slot *s)
 {
-    (void)vctx;
-    (void)wctx;
+    dmt_ctx *c = vctx;
     const uint8_t *body = s->in;
     if (s->type == PARC_BLK_PACKED) {
-        parc_err err = parc_blk_decompress(s->in, s->in_len, s->out,
-                                           s->out_len);
+        parc_err err = parc_blk_decompress(wctx, s->in, s->in_len, s->out,
+                                           s->out_len, c->version);
         if (err)
             return err;
         body = s->out;
@@ -202,6 +204,34 @@ static parc_err dmt_work(void *vctx, void *wctx, parc_mt_slot *s)
     if (parc_xxh64(body, s->out_len, 0) != s->hash)
         return PARC_ERR_CHECKSUM;
     return PARC_OK;
+}
+
+/* Per-worker decode scratch: a block dctx for version 1, nothing for v0. */
+static parc_err dmt_wctx_init(void *vctx, void **wctx)
+{
+    dmt_ctx *c = vctx;
+    if (c->version != FRAME_VERSION_V1) {
+        *wctx = NULL;
+        return PARC_OK;
+    }
+    parc_blk_dctx *dx = calloc(1, sizeof *dx);
+    if (!dx)
+        return PARC_ERR_NOMEM;
+    parc_err err = parc_blk_dctx_init(dx, c->bs);
+    if (err) {
+        free(dx);
+        return err;
+    }
+    *wctx = dx;
+    return PARC_OK;
+}
+
+static void dmt_wctx_free(void *wctx)
+{
+    if (!wctx)
+        return;
+    parc_blk_dctx_free(wctx);
+    free(wctx);
 }
 
 static parc_err dmt_write(void *vctx, parc_mt_slot *s)
@@ -217,8 +247,8 @@ static parc_err dmt_write(void *vctx, parc_mt_slot *s)
 parc_err parc_frame_decompress_mt(FILE *in, FILE *out, unsigned threads,
                                   parc_info *info)
 {
-    static const parc_mt_ops ops = {dmt_read, dmt_work, dmt_write, NULL,
-                                    NULL};
+    static const parc_mt_ops ops = {dmt_read, dmt_work, dmt_write,
+                                    dmt_wctx_init, dmt_wctx_free};
     dmt_ctx c = {0};
     c.in = in;
     c.out = out;
@@ -227,7 +257,7 @@ parc_err parc_frame_decompress_mt(FILE *in, FILE *out, unsigned threads,
     parc_buf_init(&c.seen);
 
     unsigned bl;
-    parc_err err = parc_frame_read_header(in, &bl);
+    parc_err err = parc_frame_read_header(in, &bl, &c.version);
     if (err)
         return err;
     c.bs = (size_t)1 << bl;

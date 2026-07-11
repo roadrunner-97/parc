@@ -1,8 +1,15 @@
-# parc frame format, version 0
+# parc frame format, versions 0 and 1
 
 This document is the normative specification of the parc compressed frame
-format, version 0. The implementation follows this document; where they
+format, versions 0 and 1. The implementation follows this document; where they
 disagree, this document wins and the implementation is buggy.
+
+The frame layout (§1) is shared by both versions; the header's version byte
+selects the packed-block coding: **version 0** (§2) codes a flat token stream
+with canonical Huffman; **version 1** (§3) codes a sequence model with FSE and
+repeat-offset codes. Stored blocks and every frame-level structure (headers,
+hashes, index, trailer) are identical across versions. A version-1 decoder
+MUST also accept version-0 frames.
 
 Conventions:
 
@@ -31,7 +38,7 @@ A decoder MUST reject bytes following the Footer (no concatenation in v0).
 | offset | size | field     | value                                        |
 |--------|------|-----------|----------------------------------------------|
 | 0      | 4    | magic     | `70 41 72 63` (ASCII "pArc")                 |
-| 4      | 1    | version   | 0                                            |
+| 4      | 1    | version   | 0 or 1 (selects packed coding; see §2, §3)   |
 | 5      | 1    | flags     | 0 (no flags defined; nonzero MUST be rejected as unsupported) |
 | 6      | 1    | block_log | log2 of the maximum block size; MUST be in [12, 24] |
 | 7      | 1    | reserved  | 0 (nonzero MUST be rejected)                 |
@@ -57,9 +64,10 @@ Block := type:u8  raw_len:u32  comp_len:u32  raw_hash:u64  payload[comp_len]
   (a packed encoding that does not beat stored MUST be emitted as stored).
 - `raw_hash` MUST equal xxh64 of the block's decoded bytes.
 
-Stored payload is the raw content bytes verbatim. Packed payload is
-specified in §2. Blocks are independent: a packed block never references
-bytes outside its own raw content.
+Stored payload is the raw content bytes verbatim. Packed payload is specified
+in §2 (version 0) or §3 (version 1), selected by the frame's version byte.
+Blocks are independent: a packed block never references bytes outside its own
+raw content.
 
 ### 1.3 End marker, trailer, footer
 
@@ -87,11 +95,13 @@ The index is redundant with the block headers by design: it exists so a
 seeking decoder can find block boundaries without scanning, and sequential
 decoders use it as an integrity cross-check.
 
-## 2. Packed block payload
+## 2. Packed block payload, version 0
 
-A packed payload is one LSB-first bitstream. Trailing bits of the final
-payload byte (fewer than 8) MUST be zero, and `comp_len` MUST equal the
-minimal byte count holding the bitstream, i.e. `ceil(bits/8)`.
+Used when the frame's version byte is 0. A packed payload is one LSB-first
+bitstream. Trailing bits of the final payload byte (fewer than 8) MUST be
+zero, and `comp_len` MUST equal the minimal byte count holding the bitstream,
+i.e. `ceil(bits/8)`. These two rules (exact bit accounting) apply to the
+version-1 payload of §3 as well.
 
 ### 2.1 Value buckets
 
@@ -158,7 +168,106 @@ A decoder MUST verify: every match stays within already-decoded content
 exactly at `raw_len` decoded bytes, the bitstream never reads past
 `comp_len * 8` bits, and all remaining padding bits after EOB are zero.
 
-## 3. Integrity and error taxonomy
+## 3. Packed block payload, version 1
+
+Used when the frame's version byte is 1. The payload is one LSB-first
+bitstream with the same exact-accounting rules as §2 (minimal `comp_len`,
+zero trailing padding). It codes a **sequence model**: the block's literals
+form one byte stream, and each match is a *sequence* `(litLen, matchLen,
+offCode)` where `litLen` is the count of literals immediately preceding the
+match. Trailing literals after the last match belong to no sequence.
+
+Value buckets (§2.1) are reused throughout.
+
+### 3.1 FSE streams
+
+Symbol streams are coded with table-driven asymmetric numeral coding (FSE).
+Every FSE stream is self-describing: a **table description** followed by the
+**coded symbols**.
+
+**Table description**, in order: `table_log` (4 bits, MUST be in [5, 12]);
+`max_symbol` (8 bits); then `max_symbol + 1` normalized counts, each
+bucket-coded — a 4-bit bucket `b = bucket(count)` (§2.1) followed by `b - 1`
+mantissa bits giving `count` (no mantissa for `b <= 1`). `b` MUST NOT exceed
+`table_log + 1` (else the count could exceed the table size; a decoder MUST
+reject a larger `b`). Let `T = 1 << table_log`. The counts MUST sum to exactly
+`T`, and the count for `max_symbol` MUST be nonzero. A symbol is *present* iff
+its count is nonzero.
+
+**Table construction** (both sides build identical tables from the counts).
+Spread the alphabet across `T` slots: with
+`step = (T >> 1) + (T >> 3) + 3` and slot cursor starting at 0, visit symbols
+in increasing order, placing each present symbol into the current slot `count`
+times and advancing the cursor by `step` modulo `T` after each placement
+(`step` is odd, so every slot is filled exactly once). For each slot `u` in
+`0..T-1` holding symbol `s`, let `x` be `count[s]` on the first slot of `s` and
+increment it per slot of `s`; then `nbits[u] = table_log - floor(log2(x))` and
+`newbase[u] = (x << nbits[u]) - T`.
+
+**Decoding** `n` symbols: read `state` as `table_log` bits. Then for
+`i = 0..n-1`: output `symbol[state]`; and if `i < n-1`, read `nbits[state]`
+bits as `low` and set `state = newbase[state] + low`. `n` is not stored in the
+stream; it is known from context (below). Encoders MUST lay the bitstream so
+this forward procedure recovers the symbols in order (standard tANS with the
+message processed in reverse and the final state flushed first).
+
+### 3.2 Payload structure
+
+```
+Payloadv1 := nSeq:u32(LSB-first, 32 bits)
+             (if nSeq > 0: LLStream MLStream OFStream)
+             LitStream
+```
+
+`nSeq` MUST satisfy `nSeq <= raw_len / 4` (every match covers at least
+`MIN_MATCH = 4` bytes). Each of `LLStream`, `MLStream`, `OFStream` is an FSE
+stream of `nSeq` symbols followed by that stream's per-sequence **extra bits**
+(see below). `LitStream` is an FSE stream of `nLit` literal-byte symbols,
+where `nLit = raw_len - Σ matchLen`. `nLit` MUST be `>= 1` (position 0 is
+always a literal). The streams are contiguous; each is consumed exactly.
+
+Alphabets and extra bits, per sequence `i`:
+
+- **Literal length** `LLStream`: alphabet 0..24. Symbol `b = bucket(litLen)`;
+  extra field `b - 1` bits (none for `b <= 1`) giving `litLen` per §2.1.
+- **Match length** `MLStream`: alphabet 0..24. Symbol `b = bucket(matchLen -
+  4)`; extra `b - 1` bits; `matchLen = 4 + value`.
+- **Offset** `OFStream`: alphabet 0..27. Symbols 0,1,2 are repeat-offset
+  codes; symbol `s >= 3` is a new offset with bucket `b = s - 3`, extra field
+  `max(b - 1, 0)` bits, distance `= 1 + value` (`value` per §2.1 of `s - 3`).
+
+Extra bits for a stream follow immediately after its coded symbols, in
+sequence order `i = 0..nSeq-1`: for `LLStream`/`MLStream` the bucket extra of
+`ll`/`ml`; for `OFStream` the offset extra only when `s >= 4` (i.e. bucket
+`>= 1`).
+
+### 3.3 Repeat offsets
+
+A decoder maintains a 3-entry recent-offset cache initialised to
+`recent = {1, 2, 3}` at the start of the block. For each sequence's offset
+symbol `s`:
+
+- `s < 3`: the distance is `recent[s]`; move that entry to the front, shifting
+  the entries above it down (move-to-front).
+- `s >= 3`: the distance is the decoded new offset; shift `recent` down by one
+  (dropping `recent[2]`).
+
+In both cases the resulting distance becomes `recent[0]`. Encoders emit the
+smallest matching repeat code when a match's distance equals a cached offset,
+and a new-offset code otherwise; the cache update is identical on both sides.
+
+### 3.4 Reconstruction
+
+Decode the three sequence streams (when `nSeq > 0`), then `LitStream`. Emit
+output by walking the sequences in order: copy `litLen` literals from the
+literal stream, then copy `matchLen` bytes from `distance` back (overlapping
+copies repeat, as in §2.4); finally emit the remaining literals. A decoder
+MUST verify: each `distance <= ` bytes emitted so far; each match stays within
+`raw_len`; literals are not over-consumed; and the total emitted equals
+`raw_len`. All of §2's exact-accounting checks (minimal `comp_len`, zero
+padding) apply.
+
+## 4. Integrity and error taxonomy
 
 A conforming decoder verifies, in addition to all structural MUSTs above:
 
@@ -172,10 +281,15 @@ Recommended mapping to `parc_err`: unsupported version/flags →
 hash mismatches → `PARC_ERR_CHECKSUM`; any other violation →
 `PARC_ERR_CORRUPT`.
 
-## 4. Versioning
+## 5. Versioning
 
-The version byte identifies the frame layout and packed-payload coding as a
-whole. Incompatible changes bump it; decoders reject versions they do not
-implement. Version 0 is frozen once golden fixtures exist
-(`tests/golden/`): any change to this document that alters bytes on the
-wire requires version 1.
+The version byte identifies the packed-payload coding (§2 for 0, §3 for 1);
+the frame layout (§1), stored blocks, and all integrity structures are shared.
+A version-1 decoder MUST accept both version-0 and version-1 frames and
+dispatch the packed payload by the header's version byte; it MUST reject
+versions greater than the highest it implements with a version error.
+
+Both versions are frozen: golden fixtures exist for each (`tests/golden/`,
+`*-v1.parc` for version 1), and any change to this document that alters bytes
+on the wire for an existing version is a bug. New incompatible codings take
+the next version number.
