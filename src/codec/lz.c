@@ -1,6 +1,7 @@
 #include "codec/lz.h"
 
 #include <assert.h>
+#include <math.h>
 #include <string.h>
 
 #define HASH_SIZE (1u << PARC_LZ_HASH_BITS)
@@ -107,20 +108,21 @@ size_t parc_lz_greedy(const uint8_t *src, size_t n, parc_tok *toks,
 }
 
 /* Per-level matcher parameters. Level 1 is the greedy matcher (max_chain 0);
- * 2..9 deepen the chain search and raise the "good enough" nice_len. */
+ * 2..7 deepen the hash-chain lazy search and raise the "good enough"
+ * nice_len; 8..9 feed the chain into the cost-based optimal parse. */
 parc_lz_cfg parc_lz_cfg_for_level(unsigned level)
 {
     static const parc_lz_cfg tbl[PARC_LZ_LEVEL_MAX + 1] = {
-        {0, 0},         /* unused: level 0 resolves to a default upstream */
-        {0, 0},         /* 1: greedy */
-        {8, 32},        /* 2 */
-        {16, 64},       /* 3 */
-        {32, 64},       /* 4 */
-        {64, 128},      /* 5 */
-        {128, 256},     /* 6 */
-        {256, 512},     /* 7 */
-        {1024, 1024},   /* 8 */
-        {4096, 4096},   /* 9 */
+        {0, 0, 0},       /* unused: level 0 resolves to a default upstream */
+        {0, 0, 0},       /* 1: greedy */
+        {8, 32, 0},      /* 2 */
+        {16, 64, 0},     /* 3 */
+        {32, 64, 0},     /* 4 */
+        {64, 128, 0},    /* 5 */
+        {128, 256, 0},   /* 6 */
+        {256, 512, 0},   /* 7 */
+        {128, 128, 1},   /* 8: optimal */
+        {512, 258, 1},   /* 9: optimal */
     };
     if (level < 1)
         level = 1;
@@ -219,6 +221,210 @@ size_t parc_lz_chain(const uint8_t *src, size_t n, parc_tok *toks,
         toks[nt].dist = 0;
         toks[nt].len_or_lit = src[p];
         ++nt;
+    }
+    return nt;
+}
+
+/* ---- optimal parse ---- */
+
+/* Estimated bit costs are carried in fixed point: bits * OPT_FIX. */
+#define OPT_FIX 256u
+
+/* bit_length(v): 0 for 0, else index of the highest set bit + 1. */
+static unsigned blen(uint32_t v)
+{
+    return v == 0 ? 0 : 32u - (unsigned)__builtin_clz(v);
+}
+
+/* Estimated cost, in bits*OPT_FIX, of coding one match as a v1 sequence:
+ * a litLen symbol, a matchLen symbol + its bucket extra bits, and an offset
+ * symbol + its bucket extra bits. Symbol costs are fixed estimates (litLen ~3,
+ * matchLen ~4, offset ~5 bits); the extra-bit counts are exact. This is a
+ * generic LZ price — longer matches and shorter distances come out cheaper —
+ * so it also guides the v0 Huffman parse sensibly. */
+static uint64_t match_cost(uint32_t len, uint32_t dist)
+{
+    unsigned mlb = blen(len - PARC_LZ_MIN_MATCH);
+    unsigned ofb = blen(dist - 1);
+    unsigned extra = (mlb ? mlb - 1u : 0u) + (ofb ? ofb - 1u : 0u);
+    return (uint64_t)(12u + extra) * OPT_FIX;
+}
+
+/* Per-byte literal cost from the block's order-0 histogram (bits*OPT_FIX):
+ * common bytes are cheaper, so the parse won't trade a good match for literals
+ * that are actually expensive. Bytes absent from the block get a high cost
+ * (they are never emitted as literals anyway). */
+static void build_lit_prices(const uint8_t *src, size_t n, uint32_t *litp)
+{
+    uint32_t freq[256] = {0};
+    for (size_t i = 0; i < n; ++i)
+        freq[src[i]]++;
+    for (unsigned b = 0; b < 256; ++b) {
+        if (freq[b] == 0) {
+            litp[b] = 16u * OPT_FIX;
+            continue;
+        }
+        double bits = log2((double)n / (double)freq[b]);
+        if (bits < 0.0625)
+            bits = 0.0625; /* floor so a dominant byte still costs something */
+        else if (bits > 16.0)
+            bits = 16.0;
+        litp[b] = (uint32_t)(bits * OPT_FIX + 0.5);
+    }
+}
+
+typedef struct opt_match {
+    uint32_t len;
+    uint32_t dist;
+} opt_match;
+
+/* Collect the match frontier at position i: walk the chain (most-recent first)
+ * and record every strict length improvement as (len, dist). Entries come out
+ * in increasing length; because recent positions sit at smaller distances, the
+ * first entry reaching a given length also carries a near-minimal distance for
+ * it. Returns the entry count (<= PARC_OPT_MATCHES). */
+static uint32_t find_matches(const uint8_t *src, size_t n, size_t i,
+                             uint32_t cand, const uint32_t *prev,
+                             parc_lz_cfg cfg, opt_match *out)
+{
+    size_t max_len = n - i;
+    size_t best = PARC_LZ_MIN_MATCH - 1; /* only strictly longer counts */
+    uint32_t chain = cfg.max_chain;
+    uint32_t cnt = 0;
+
+    while (cand != NO_POS && chain--) {
+        /* best < max_len always holds (we break when best reaches max_len),
+         * so src[i + best] and src[cand + best] are in bounds. */
+        if (src[cand + best] == src[i + best]) {
+            size_t l = match_len(src, cand, i, max_len);
+            if (l > best) {
+                best = l;
+                opt_match m = {(uint32_t)l, (uint32_t)(i - cand)};
+                /* keep the longest even once the array is full */
+                out[cnt < PARC_OPT_MATCHES ? cnt : PARC_OPT_MATCHES - 1] = m;
+                if (cnt < PARC_OPT_MATCHES)
+                    ++cnt;
+                if (l >= cfg.nice_len || l >= max_len)
+                    break;
+            }
+        }
+        cand = prev[cand];
+    }
+    return cnt;
+}
+
+size_t parc_lz_optimal(const uint8_t *src, size_t n, parc_tok *toks,
+                       uint32_t *head, uint32_t *prev, parc_lz_cfg cfg,
+                       uint64_t *price, uint32_t *bt_len, uint32_t *bt_dist)
+{
+    assert(n <= PARC_LZ_MAX_BLOCK && cfg.max_chain >= 1);
+    memset(head, 0xFF, HASH_SIZE * sizeof *head); /* all NO_POS */
+
+    uint32_t litp[256];
+    build_lit_prices(src, n, litp);
+
+    size_t nt = 0;
+    size_t c = 0;
+    while (c < n) {
+        size_t clen = n - c > PARC_OPT_CHUNK ? PARC_OPT_CHUNK : n - c;
+
+        /* price[k] = min estimated cost to encode the chunk's first k bytes;
+         * bt_dist/bt_len[k] record the token arriving at k (dist 0 = literal
+         * byte in bt_len). price[0] = 0; every k is reachable via literals. */
+        for (size_t k = 0; k <= clen; ++k)
+            price[k] = UINT64_MAX;
+        price[0] = 0;
+
+        /* When a position yields a match at least nice_len long, the optimal
+         * path almost certainly takes it, so the interior positions are still
+         * inserted into the chain (later matches may reference them) but their
+         * expensive frontier search is skipped up to skip_until. This keeps
+         * deep chains affordable on repetitive data. */
+        size_t skip_until = 0;
+
+        for (size_t ii = 0; ii < clen; ++ii) {
+            size_t pos = c + ii;
+            uint64_t pc = price[ii];
+
+            uint64_t lp = pc + litp[src[pos]];
+            if (lp < price[ii + 1]) {
+                price[ii + 1] = lp;
+                bt_len[ii + 1] = src[pos];
+                bt_dist[ii + 1] = 0;
+            }
+
+            if (pos + PARC_LZ_MIN_MATCH > n)
+                continue;
+
+            uint32_t h = hash4(read32(src + pos));
+            uint32_t cand = head[h];
+            prev[pos] = cand;
+            head[h] = (uint32_t)pos;
+
+            if (pos < skip_until)
+                continue; /* inside a committed long match: index only */
+
+            opt_match out[PARC_OPT_MATCHES];
+            uint32_t cnt = find_matches(src, n, pos, cand, prev, cfg, out);
+            if (cnt == 0)
+                continue;
+
+            uint32_t bl = out[cnt - 1].len;
+            if (out[cnt - 1].len >= cfg.nice_len) /* skip the interior span */
+                skip_until = pos + out[cnt - 1].len;
+            if (bl > clen - ii) /* a match may not cross the chunk boundary */
+                bl = (uint32_t)(clen - ii);
+            if (bl < PARC_LZ_MIN_MATCH)
+                continue;
+
+            /* always price the full longest match so long runs are taken in
+             * one step (bounds the DP work on repetitive data) */
+            uint32_t di = 0;
+            while (di + 1 < cnt && out[di].len < bl)
+                ++di;
+            uint64_t mp = pc + match_cost(bl, out[di].dist);
+            if (mp < price[ii + bl]) {
+                price[ii + bl] = mp;
+                bt_len[ii + bl] = bl;
+                bt_dist[ii + bl] = out[di].dist;
+            }
+
+            /* price a bounded window of short lengths, each at the smallest
+             * distance that reaches it, so a shorter match here can win when
+             * it sets up a cheaper continuation */
+            uint32_t fk = 0, budget = PARC_OPT_BUDGET;
+            for (uint32_t ell = PARC_LZ_MIN_MATCH; ell <= bl && budget;
+                 ++ell, --budget) {
+                while (fk < cnt && out[fk].len < ell)
+                    ++fk;
+                if (fk >= cnt)
+                    break;
+                uint64_t p = pc + match_cost(ell, out[fk].dist);
+                if (p < price[ii + ell]) {
+                    price[ii + ell] = p;
+                    bt_len[ii + ell] = ell;
+                    bt_dist[ii + ell] = out[fk].dist;
+                }
+            }
+        }
+
+        /* backtrack the chunk into tokens (emitted in reverse, then flipped) */
+        size_t start = nt;
+        size_t j = clen;
+        while (j > 0) {
+            uint32_t d = bt_dist[j], l = bt_len[j];
+            toks[nt].dist = d;
+            toks[nt].len_or_lit = l;
+            ++nt;
+            j -= (d == 0) ? 1 : l;
+        }
+        for (size_t a = start, b = nt; a + 1 < b; ++a, --b) {
+            parc_tok t = toks[a];
+            toks[a] = toks[b - 1];
+            toks[b - 1] = t;
+        }
+
+        c += clen;
     }
     return nt;
 }

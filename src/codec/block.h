@@ -35,6 +35,13 @@ typedef struct parc_blk_cctx {
     size_t max_block;
     parc_lz_cfg cfg;
     unsigned version;
+    /* optimal-parse DP scratch, PARC_OPT_CHUNK + 1 entries each; NULL unless
+     * cfg.optimal (levels 8..9). alt holds the alternate encode candidate
+     * (max_block bytes) for the best-of-two comparison. */
+    uint64_t *opt_price;
+    uint32_t *opt_len;
+    uint32_t *opt_dist;
+    uint8_t *alt;
     /* v1 only (NULL at version 0) */
     uint8_t *lit;    /* literal bytes, max_block */
     uint8_t *ll_sym; /* per-sequence bucket symbols, max_block/4 + 1 */

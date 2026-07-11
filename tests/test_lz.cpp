@@ -79,6 +79,24 @@ LzResult lz_chain(const std::vector<uint8_t> &in, unsigned level) {
     return r;
 }
 
+// Run the optimal parser at one level, check invariants, and rebuild.
+LzResult lz_optimal(const std::vector<uint8_t> &in, unsigned level) {
+    LzResult r;
+    r.toks.resize(in.size() + 1);
+    std::vector<uint32_t> head(1u << PARC_LZ_HASH_BITS);
+    std::vector<uint32_t> prev(in.size() ? in.size() : 1);
+    std::vector<uint64_t> price(PARC_OPT_CHUNK + 1);
+    std::vector<uint32_t> btl(PARC_OPT_CHUNK + 1), btd(PARC_OPT_CHUNK + 1);
+    parc_lz_cfg cfg = parc_lz_cfg_for_level(level);
+    size_t nt = parc_lz_optimal(in.data(), in.size(), r.toks.data(),
+                                head.data(), prev.data(), cfg, price.data(),
+                                btl.data(), btd.data());
+    EXPECT_LE(nt, in.size());
+    r.toks.resize(nt);
+    check_rebuild(r, in);
+    return r;
+}
+
 std::vector<uint8_t> gen(parc_err (*g)(parc_rng *, size_t, parc_buf *),
                          uint64_t seed, size_t n) {
     parc_rng rng;
@@ -171,4 +189,53 @@ TEST(LzChain, LongRunCollapsesToOverlappedMatch) {
     EXPECT_LE(r.toks.size(), 8u);
     ASSERT_GE(r.toks.size(), 2u);
     EXPECT_EQ(r.toks[1].dist, 1u);
+}
+
+// Levels 8 and 9 run the cost-based optimal parse.
+TEST(LzOptimal, TokensRebuildInputAcrossLevelsAndGenerators) {
+    for (unsigned lvl : {8u, 9u})
+        for (auto g : {parc_gen_random, parc_gen_text, parc_gen_json_log})
+            for (size_t n : {size_t{0}, size_t{1}, size_t{3}, size_t{4},
+                             size_t{5}, size_t{63}, size_t{4096},
+                             size_t{100000}}) {
+                auto in = gen(g, 42 + n + lvl, n);
+                lz_optimal(in, lvl);  // asserts rebuild == in
+            }
+}
+
+// Exercise the multi-chunk path (blocks larger than PARC_OPT_CHUNK).
+TEST(LzOptimal, TokensRebuildAcrossChunkBoundary) {
+    for (unsigned lvl : {8u, 9u}) {
+        auto in = gen(parc_gen_json_log, 7 + lvl, PARC_OPT_CHUNK * 2 + 12345);
+        lz_optimal(in, lvl);  // asserts rebuild == in
+    }
+}
+
+TEST(LzOptimal, ShortInputsAreAllLiterals) {
+    for (size_t n = 0; n < PARC_LZ_MIN_MATCH; ++n) {
+        std::vector<uint8_t> in(n, 0xAB);
+        auto r = lz_optimal(in, 9);
+        EXPECT_EQ(r.toks.size(), n);
+        for (const auto &t : r.toks) EXPECT_EQ(t.dist, 0u);
+    }
+}
+
+TEST(LzOptimal, LongRunCollapsesToOverlappedMatch) {
+    std::vector<uint8_t> in(100000, 'a');
+    auto r = lz_optimal(in, 9);
+    EXPECT_LE(r.toks.size(), 8u);
+    ASSERT_GE(r.toks.size(), 2u);
+    EXPECT_EQ(r.toks[1].dist, 1u);
+}
+
+// The optimal parse must beat the greedy matcher's token bit-cost proxy on
+// repetitive text: it should emit no more tokens than greedy there.
+TEST(LzOptimal, RepetitiveTextBeatsGreedy) {
+    std::string s;
+    for (int i = 0; i < 400; ++i)
+        s += "the quick brown fox #" + std::to_string(i % 13) + " ";
+    std::vector<uint8_t> in(s.begin(), s.end());
+    size_t greedy = lz(in).toks.size();
+    for (unsigned lvl : {8u, 9u})
+        EXPECT_LE(lz_optimal(in, lvl).toks.size(), greedy) << "level " << lvl;
 }

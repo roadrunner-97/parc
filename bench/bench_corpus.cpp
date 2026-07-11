@@ -259,7 +259,7 @@ std::vector<Codec> make_codecs() {
         {"parc-1", parc1_compress, parc0_decompress, false},
     };
     // level sweep (parc-N is the default level); ratio ladder per commit
-    for (unsigned L : {1u, 6u, 9u}) {
+    for (unsigned L : {1u, 6u, 8u, 9u}) {
         using namespace std::placeholders;
         codecs.push_back({"parc-0-L" + std::to_string(L),
                           std::bind(parc0_compress_level, L, _1, _2),

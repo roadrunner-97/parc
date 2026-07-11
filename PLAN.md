@@ -1,6 +1,6 @@
 # parc — implementation plan
 
-**Status (2026-07-11):** Phases 1–4 complete; Phase 5 underway. Phase 2
+**Status (2026-07-12):** Phases 1–4 complete; Phase 5 underway. Phase 2
 delivered stats core
 (+ merge, LZ probe), parcgen generators + CLI, parcent CLI (ent-validated,
 multithreaded, with `tools/parcent/ent-diff.py` as a standing CTest
@@ -89,9 +89,31 @@ model's litLen overhead roughly cancels the FSE/rep-offset gains when nothing
 recurs). FSE-over-Huffman on literals is inherently marginal (as zstd's
 Huffman-literals design implies); v1's real-data win comes from separate
 distributions + repeat offsets, and is the foundation for the matching work that
-makes the sequence model pay more. Bench gained `parc-1[-L*/-t*]` entries. Next
-Phase 5 levers: wider/faster decode, and richer matching (optimal parse, larger
-windows) to exploit the sequence model.
+makes the sequence model pay more. Bench gained `parc-1[-L*/-t*]` entries.
+Then richer matching arrived as an **optimal parse** at levels 8–9 (wire-neutral,
+no format change; levels 1–7 untouched). `parc_lz_optimal` (`src/codec/lz.c`) is a
+cost-based dynamic-programming matcher: literals are priced by the block's order-0
+entropy, matches by an estimated sequence cost (litLen/matchLen/offset symbols +
+exact bucket extra bits), and a forward DP + backtrack over `PARC_OPT_CHUNK`-sized
+windows picks the minimum-cost parse; a hash-chain frontier feeds candidate
+(len, dist) pairs and a nice-length skip keeps deep chains affordable on
+repetitive data. Because a static cost model misjudges some small/binary blocks,
+`block.c` encodes *both* the optimal parse and the level-7 lazy parse and keeps
+the byte-smaller block (`encode_v0`/`encode_v1` split out of the compressors and
+driven with an explicit byte cap), so 8–9 are provably never worse than 7. DP
+scratch (`opt_price`/`opt_len`/`opt_dist` + an `alt` alternate-encode buffer)
+lives in `parc_blk_cctx`, allocated only at optimal levels; the MT path threads
+level through unchanged. Correctness rides the rig plus new `LzOptimal` tests
+(per-level roundtrip across generators/sizes, the multi-chunk boundary, long-run
+collapse, beats-greedy); full matrix green incl. TSan, roundtrip+decode fuzz
+clean, golden fixtures byte-frozen. On the corpus the optimal tier extends the
+ratio ladder monotonically past L7 where structure recurs — L9 vs L7: xml
+0.1026→0.0986, nci 0.0746→0.0698, samba 0.2255→0.2165, dickens 0.3406→0.3339,
+lcet10 0.3090→0.3026, alice 0.3445→0.3431 — while incompressible/tiny files hold
+at the L7 floor (kennedy.xls, grammar.lsp, xargs.1 flat). The cost is speed: L8
+~3–4 MiB/s, L9 ~1–2 MiB/s (optimal-parse territory, à la zstd btopt/btultra).
+Bench level sweep gained L8. Next Phase 5 levers: faster decode, larger windows,
+and repeat-offset-aware / multi-pass pricing to widen the optimal-parse win.
 
 Phases are ordered so that measurement exists before the codec does, and
 correctness is locked in before performance work starts. Each phase ends green:

@@ -92,6 +92,15 @@ parc_err parc_blk_cctx_init(parc_blk_cctx *cx, size_t max_block, unsigned level,
     cx->prev = cx->cfg.max_chain ? malloc(max_block * sizeof *cx->prev) : NULL;
     int ok = cx->htab && cx->toks && (!cx->cfg.max_chain || cx->prev);
 
+    if (cx->cfg.optimal) {
+        size_t nchunk = (size_t)PARC_OPT_CHUNK + 1;
+        cx->opt_price = malloc(nchunk * sizeof *cx->opt_price);
+        cx->opt_len = malloc(nchunk * sizeof *cx->opt_len);
+        cx->opt_dist = malloc(nchunk * sizeof *cx->opt_dist);
+        cx->alt = malloc(max_block);
+        ok = ok && cx->opt_price && cx->opt_len && cx->opt_dist && cx->alt;
+    }
+
     if (version == 1) {
         size_t nseq_max = max_block / PARC_LZ_MIN_MATCH + 1;
         cx->lit = malloc(max_block);
@@ -118,6 +127,10 @@ void parc_blk_cctx_free(parc_blk_cctx *cx)
     free(cx->htab);
     free(cx->prev);
     free(cx->toks);
+    free(cx->opt_price);
+    free(cx->opt_len);
+    free(cx->opt_dist);
+    free(cx->alt);
     free(cx->lit);
     free(cx->ll_sym);
     free(cx->ml_sym);
@@ -163,18 +176,19 @@ void parc_blk_dctx_free(parc_blk_dctx *dx)
 
 /* ---- v0: Huffman over a flat token stream (FORMAT.md §2) ---- */
 
-static int blk_compress_v0(parc_blk_cctx *cx, const uint8_t *src,
-                           uint32_t raw_len, uint8_t *dst, uint32_t *comp_len)
+/* Encode the token stream toks[0..nt) into dst with capacity cap (bytes).
+ * Returns PARC_BLK_PACKED with *comp_len on success, or PARC_BLK_STORED when
+ * the encoding overflows cap (does not beat the current best / stored). */
+static int encode_v0(parc_blk_cctx *cx, const uint8_t *src, uint32_t raw_len,
+                     const parc_tok *toks, size_t nt, uint8_t *dst,
+                     uint32_t cap, uint32_t *comp_len)
 {
-    size_t nt = cx->cfg.max_chain
-                    ? parc_lz_chain(src, raw_len, cx->toks, cx->htab, cx->prev,
-                                    cx->cfg)
-                    : parc_lz_greedy(src, raw_len, cx->toks, cx->htab);
-
+    (void)cx;
+    (void)src;
     uint32_t mfreq[MAIN_SYMS] = {0};
     uint32_t dfreq[DIST_SYMS] = {0};
     for (size_t t = 0; t < nt; ++t) {
-        const parc_tok *tk = &cx->toks[t];
+        const parc_tok *tk = &toks[t];
         if (tk->dist == 0) {
             mfreq[tk->len_or_lit]++;
         } else {
@@ -191,16 +205,16 @@ static int blk_compress_v0(parc_blk_cctx *cx, const uint8_t *src,
     parc_henc_init(&menc, mlens, MAIN_SYMS);
     parc_henc_init(&denc, dlens, DIST_SYMS);
 
-    /* capacity raw_len - 1 makes "packed must beat stored" automatic: any
-     * overflow surfaces as PARC_ERR_LIMIT from the sticky writer */
+    /* cap (<= raw_len - 1) makes "packed must beat the current best" automatic:
+     * any overflow surfaces as PARC_ERR_LIMIT from the sticky writer */
     parc_bw w;
-    parc_bw_init(&w, dst, raw_len - 1);
+    parc_bw_init(&w, dst, cap);
     for (unsigned s = 0; s < MAIN_SYMS; ++s)
         parc_bw_put(&w, mlens[s], 4);
     for (unsigned s = 0; s < DIST_SYMS; ++s)
         parc_bw_put(&w, dlens[s], 4);
     for (size_t t = 0; t < nt; ++t) {
-        const parc_tok *tk = &cx->toks[t];
+        const parc_tok *tk = &toks[t];
         if (tk->dist == 0) {
             parc_henc_put(&menc, &w, tk->len_or_lit);
             continue;
@@ -327,20 +341,18 @@ static parc_err read_fse_stream(parc_br *r, uint8_t *out, size_t count,
     return parc_fse_decode(r, fd, out, count);
 }
 
-static int blk_compress_v1(parc_blk_cctx *cx, const uint8_t *src,
-                           uint32_t raw_len, uint8_t *dst, uint32_t *comp_len)
+static int encode_v1(parc_blk_cctx *cx, const uint8_t *src, uint32_t raw_len,
+                     const parc_tok *toks, size_t nt, uint8_t *dst,
+                     uint32_t cap, uint32_t *comp_len)
 {
-    size_t nt = cx->cfg.max_chain
-                    ? parc_lz_chain(src, raw_len, cx->toks, cx->htab, cx->prev,
-                                    cx->cfg)
-                    : parc_lz_greedy(src, raw_len, cx->toks, cx->htab);
+    (void)src;
 
     /* Transcode tokens into a literal run and a sequence list, tracking the
      * recent-offset cache for repeat-offset codes. */
     uint32_t recent[NREP] = {1, 2, 3};
     uint32_t nlit = 0, nseq = 0, pend = 0;
     for (size_t t = 0; t < nt; ++t) {
-        const parc_tok *tk = &cx->toks[t];
+        const parc_tok *tk = &toks[t];
         if (tk->dist == 0) {
             cx->lit[nlit++] = (uint8_t)tk->len_or_lit;
             pend++;
@@ -380,7 +392,7 @@ static int blk_compress_v1(parc_blk_cctx *cx, const uint8_t *src,
     }
 
     parc_bw w;
-    parc_bw_init(&w, dst, raw_len - 1);
+    parc_bw_init(&w, dst, cap);
     parc_bw_put(&w, nseq, 32);
     parc_fenc *fe = cx->fenc;
     if (nseq > 0) {
@@ -497,13 +509,63 @@ static parc_err blk_decompress_v1(parc_blk_dctx *dx, const uint8_t *comp,
 
 /* ---- dispatch ---- */
 
+/* Encode toks[0..nt) in the context's wire version into dst with capacity cap. */
+static int encode_block(parc_blk_cctx *cx, const uint8_t *src, uint32_t raw_len,
+                        const parc_tok *toks, size_t nt, uint8_t *dst,
+                        uint32_t cap, uint32_t *comp_len)
+{
+    return cx->version == 1
+               ? encode_v1(cx, src, raw_len, toks, nt, dst, cap, comp_len)
+               : encode_v0(cx, src, raw_len, toks, nt, dst, cap, comp_len);
+}
+
 int parc_blk_compress(parc_blk_cctx *cx, const uint8_t *src, uint32_t raw_len,
                       uint8_t *dst, uint32_t *comp_len)
 {
     assert(raw_len >= 1 && raw_len <= cx->max_block);
-    return cx->version == 1
-               ? blk_compress_v1(cx, src, raw_len, dst, comp_len)
-               : blk_compress_v0(cx, src, raw_len, dst, comp_len);
+
+    /* Non-optimal levels: one matcher, one encode; capacity raw_len - 1 makes
+     * "packed must beat stored" automatic. */
+    if (!cx->cfg.optimal) {
+        size_t nt = cx->cfg.max_chain
+                        ? parc_lz_chain(src, raw_len, cx->toks, cx->htab,
+                                        cx->prev, cx->cfg)
+                        : parc_lz_greedy(src, raw_len, cx->toks, cx->htab);
+        return encode_block(cx, src, raw_len, cx->toks, nt, dst, raw_len - 1,
+                            comp_len);
+    }
+
+    /* Optimal levels: the cost-based parse minimizes an estimated bit cost,
+     * which can misjudge blocks the real entropy stage prices differently (it
+     * loses on some small/binary blocks). So encode both a lazy parse and the
+     * optimal parse and keep the smaller — the optimal tier is then never worse
+     * than the lazy one. The lazy candidate uses the strongest non-optimal
+     * config (level 7) so the optimal tiers are also never worse than level 7,
+     * regardless of how the optimal search is tuned. It lands in dst; the
+     * optimal candidate encodes into cx->alt capped one byte under the lazy
+     * size, so it is kept only when it strictly wins. */
+    parc_lz_cfg lazy = parc_lz_cfg_for_level(PARC_LZ_LEVEL_MAX - 2);
+    size_t nt_lazy = parc_lz_chain(src, raw_len, cx->toks, cx->htab, cx->prev,
+                                   lazy);
+    uint32_t cl_lazy = 0;
+    int r_lazy = encode_block(cx, src, raw_len, cx->toks, nt_lazy, dst,
+                              raw_len - 1, &cl_lazy);
+
+    size_t nt_opt = parc_lz_optimal(src, raw_len, cx->toks, cx->htab, cx->prev,
+                                    cx->cfg, cx->opt_price, cx->opt_len,
+                                    cx->opt_dist);
+    uint32_t opt_cap = r_lazy == PARC_BLK_PACKED ? cl_lazy - 1 : raw_len - 1;
+    uint32_t cl_opt = 0;
+    int r_opt = encode_block(cx, src, raw_len, cx->toks, nt_opt, cx->alt,
+                             opt_cap, &cl_opt);
+
+    if (r_opt == PARC_BLK_PACKED) {
+        memcpy(dst, cx->alt, cl_opt);
+        *comp_len = cl_opt;
+        return PARC_BLK_PACKED;
+    }
+    *comp_len = cl_lazy;
+    return r_lazy;
 }
 
 parc_err parc_blk_decompress(parc_blk_dctx *dx, const uint8_t *comp,
