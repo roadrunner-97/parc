@@ -123,7 +123,8 @@ parc_err parc_frame_check_trailer(FILE *in, const parc_buf *seen,
 
 /* Multithreaded paths (frame_mt.c); threads >= 2, bl validated. */
 parc_err parc_frame_compress_mt(FILE *in, FILE *out, unsigned bl,
-                                unsigned threads, parc_info *info);
+                                unsigned threads, unsigned level,
+                                parc_info *info);
 parc_err parc_frame_decompress_mt(FILE *in, FILE *out, unsigned threads,
                                   parc_info *info);
 

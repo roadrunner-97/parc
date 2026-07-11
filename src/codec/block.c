@@ -25,14 +25,20 @@ static uint32_t bucket_rem(uint32_t v, unsigned b)
     return v - (1u << (b - 1));
 }
 
-parc_err parc_blk_cctx_init(parc_blk_cctx *cx, size_t max_block)
+parc_err parc_blk_cctx_init(parc_blk_cctx *cx, size_t max_block,
+                            unsigned level)
 {
-    if (max_block == 0 || max_block > PARC_LZ_MAX_BLOCK)
+    if (max_block == 0 || max_block > PARC_LZ_MAX_BLOCK || level < 1 ||
+        level > PARC_LZ_LEVEL_MAX)
         return PARC_ERR_ARG;
+    cx->cfg = parc_lz_cfg_for_level(level);
     cx->htab = malloc(((size_t)1 << PARC_LZ_HASH_BITS) * sizeof *cx->htab);
     cx->toks = malloc(max_block * sizeof *cx->toks);
+    cx->prev = cx->cfg.max_chain
+                   ? malloc(max_block * sizeof *cx->prev)
+                   : NULL;
     cx->max_block = max_block;
-    if (!cx->htab || !cx->toks) {
+    if (!cx->htab || !cx->toks || (cx->cfg.max_chain && !cx->prev)) {
         parc_blk_cctx_free(cx);
         return PARC_ERR_NOMEM;
     }
@@ -42,8 +48,10 @@ parc_err parc_blk_cctx_init(parc_blk_cctx *cx, size_t max_block)
 void parc_blk_cctx_free(parc_blk_cctx *cx)
 {
     free(cx->htab);
+    free(cx->prev);
     free(cx->toks);
     cx->htab = NULL;
+    cx->prev = NULL;
     cx->toks = NULL;
     cx->max_block = 0;
 }
@@ -53,7 +61,10 @@ int parc_blk_compress(parc_blk_cctx *cx, const uint8_t *src, uint32_t raw_len,
 {
     assert(raw_len >= 1 && raw_len <= cx->max_block);
 
-    size_t nt = parc_lz_greedy(src, raw_len, cx->toks, cx->htab);
+    size_t nt = cx->cfg.max_chain
+                    ? parc_lz_chain(src, raw_len, cx->toks, cx->htab,
+                                    cx->prev, cx->cfg)
+                    : parc_lz_greedy(src, raw_len, cx->toks, cx->htab);
 
     uint32_t mfreq[MAIN_SYMS] = {0};
     uint32_t dfreq[DIST_SYMS] = {0};

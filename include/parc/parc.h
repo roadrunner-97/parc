@@ -19,17 +19,29 @@ extern "C" {
 /* Upper bound on the threads fields below. */
 #define PARC_THREADS_MAX 512
 
+/* Compression level range. Level selects match-search effort only; every
+ * level produces a valid v0 frame that any decoder reads. */
+#define PARC_LEVEL_MIN 1
+#define PARC_LEVEL_MAX 9
+#define PARC_LEVEL_DEFAULT 3
+
 typedef struct parc_copts {
     /* log2 of the maximum block size: 0 for the default (20 → 1 MiB),
      * else 12..24. Larger blocks improve ratio (matches are block-local)
-     * at the cost of memory: compression uses ~10x block size,
-     * decompression ~2x. */
+     * at the cost of memory: compression uses ~10x block size (~14x at
+     * chain levels, see level), decompression ~2x. */
     unsigned block_log;
     /* worker threads: 0 or 1 compresses on the calling thread; N >= 2
      * runs a pipeline of N compression workers plus a writer thread,
      * keeping 2N blocks in flight (memory ~N x 14x block size). Values
      * above PARC_THREADS_MAX are rejected with PARC_ERR_ARG. */
     unsigned threads;
+    /* compression level: 0 for the default (PARC_LEVEL_DEFAULT), else
+     * PARC_LEVEL_MIN..PARC_LEVEL_MAX. Level 1 is a fast greedy matcher;
+     * higher levels widen the hash-chain match search (and use the chain
+     * array, ~4x block size extra) for a better ratio at lower speed.
+     * Out-of-range values are rejected with PARC_ERR_ARG. */
+    unsigned level;
 } parc_copts;
 
 typedef struct parc_dopts {

@@ -1,6 +1,7 @@
 /* libFuzzer target: treat the input as raw content, compress it, decompress
  * the result, and demand bit-identity. The first byte picks the block size
- * so block boundaries get fuzzed too. */
+ * and the compression level so block boundaries and every matcher get
+ * fuzzed too. */
 #define _POSIX_C_SOURCE 200809L
 
 #include <stdint.h>
@@ -16,7 +17,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     if (size < 1)
         return 0;
-    parc_copts opts = {12 + data[0] % 6u, 0};
+    parc_copts opts = {12 + data[0] % 6u, 0, 1 + (data[0] / 6u) % 9u};
     data++;
     size--;
 

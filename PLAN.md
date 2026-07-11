@@ -1,6 +1,7 @@
 # parc — implementation plan
 
-**Status (2026-07-10):** Phases 1–4 complete. Phase 2 delivered stats core
+**Status (2026-07-11):** Phases 1–4 complete; Phase 5 underway. Phase 2
+delivered stats core
 (+ merge, LZ probe), parcgen generators + CLI, parcent CLI (ent-validated,
 multithreaded, with `tools/parcent/ent-diff.py` as a standing CTest
 differential test against `ent`), corpus fetcher + manifest, benchmark
@@ -35,7 +36,24 @@ gained parc-0-t{2,4,8,16} entries (wall-clock timed) to track scaling per
 commit. First archived MT run (`bench/results/92cee24.json`, in-memory
 harness incl. per-call thread spawn): enwik8 t16 compress 1205 MiB/s
 (6.9x), decompress 768 MiB/s (5.2x); near-linear to t4, tapering beyond
-t8. Next: Phase 5.
+t8.
+Phase 5 (in progress) began with the match stage, format-preserving so the
+decoder, golden fixtures and wire format are untouched (no version bump). A
+compression level 1..9 (`parc_copts.level`, CLI `-L`, default 3) drives the
+matcher: level 1 is the existing greedy hash-table matcher; 2..9 use a new
+hash-chain + one-step-lazy matcher (`parc_lz_chain`, `parc_lz_cfg_for_level`
+in `src/codec/lz.c`) with deepening chain length and nice-length. The chain
+array (`parc_blk_cctx.prev`, ~4x block size) is allocated only at chain
+levels; MT path threads level through unchanged. Correctness rides the
+existing rig: per-level token-invariant + rebuild tests (`test_lz.cpp`),
+all-levels block roundtrip (`test_block.cpp`), the roundtrip fuzzer now
+fuzzes level too; full matrix green incl. TSan; roundtrip fuzz smoke clean.
+enwik8 single-threaded: the default (L3) ratio is 0.348 — past zstd-3 (0.354)
+and zlib-6 (0.365) — vs the old greedy 0.403, at 49 MiB/s compress (L1 0.403
+@ 170, L6 0.339 @ 11, L9 0.336 @ 3.9). Bench gained `parc-0-L{1,6,9}`
+entries. Decompression is unchanged (~180 MiB/s, still bit-serial Huffman) —
+the next Phase 5 lever: table-based decode + FSE. Next: decode speed, then
+FSE/tANS + repeat-offset codes (a v1 format bump).
 
 Phases are ordered so that measurement exists before the codec does, and
 correctness is locked in before performance work starts. Each phase ends green:

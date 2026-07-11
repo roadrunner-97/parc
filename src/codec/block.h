@@ -21,15 +21,20 @@ enum parc_btype {
     PARC_BLK_END = 0xFF, /* end marker; not a block type on the API below */
 };
 
-/* Reusable compression scratch (hash table + token array), sized for
- * blocks up to max_block bytes. */
+/* Reusable compression scratch (hash table + token array, plus the chain
+ * array for chain levels), sized for blocks up to max_block bytes and fixed
+ * to one compression level. */
 typedef struct parc_blk_cctx {
     uint32_t *htab;
+    uint32_t *prev; /* chain array, max_block entries; NULL at greedy levels */
     parc_tok *toks;
     size_t max_block;
+    parc_lz_cfg cfg;
 } parc_blk_cctx;
 
-parc_err parc_blk_cctx_init(parc_blk_cctx *cx, size_t max_block);
+/* level must be in [1, PARC_LZ_LEVEL_MAX]. */
+parc_err parc_blk_cctx_init(parc_blk_cctx *cx, size_t max_block,
+                            unsigned level);
 void parc_blk_cctx_free(parc_blk_cctx *cx);
 
 /* Compress src[0..raw_len) into dst, raw_len in [1, cx->max_block] and

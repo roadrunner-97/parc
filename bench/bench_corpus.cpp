@@ -135,7 +135,7 @@ size_t parc0_compress_t(unsigned threads, const std::vector<uint8_t> &in,
     char *buf = nullptr;
     size_t len = 0;
     FILE *fout = open_memstream(&buf, &len);
-    parc_copts opts = {0, threads};
+    parc_copts opts = {0, threads, 0};
     if (!fin || !fout ||
         parc_compress_stream(fin, fout, &opts, nullptr) != PARC_OK)
         throw std::runtime_error("parc compress failed");
@@ -162,6 +162,25 @@ void parc0_decompress_t(unsigned threads, const std::vector<uint8_t> &comp,
     if (len != orig_size) throw std::runtime_error("parc size mismatch");
     memcpy(out.data(), buf, len);
     free(buf);
+}
+
+// Single-threaded compression at an explicit level (decompression is
+// level-independent, so the parc-0-LN entries reuse parc0_decompress).
+size_t parc0_compress_level(unsigned level, const std::vector<uint8_t> &in,
+                            std::vector<uint8_t> &out) {
+    FILE *fin = fmemopen(const_cast<uint8_t *>(in.data()), in.size(), "rb");
+    char *buf = nullptr;
+    size_t len = 0;
+    FILE *fout = open_memstream(&buf, &len);
+    parc_copts opts = {0, 1, level};
+    if (!fin || !fout ||
+        parc_compress_stream(fin, fout, &opts, nullptr) != PARC_OK)
+        throw std::runtime_error("parc compress failed");
+    fclose(fin);
+    fclose(fout);
+    out.assign(buf, buf + len);
+    free(buf);
+    return len;
 }
 
 size_t parc0_compress(const std::vector<uint8_t> &in,
@@ -227,6 +246,13 @@ std::vector<Codec> make_codecs() {
         {"zstd-3", zstd_compress, zstd_decompress, false},
         {"parc-0", parc0_compress, parc0_decompress, false},
     };
+    // level sweep (parc-0 is the default level); ratio ladder per commit
+    for (unsigned L : {1u, 6u, 9u}) {
+        using namespace std::placeholders;
+        codecs.push_back({"parc-0-L" + std::to_string(L),
+                          std::bind(parc0_compress_level, L, _1, _2),
+                          parc0_decompress, false});
+    }
     // thread-scaling sweep for the Phase 4 pipeline
     for (unsigned t : {2u, 4u, 8u, 16u}) {
         using namespace std::placeholders;

@@ -47,7 +47,7 @@ std::vector<uint8_t> compress(const std::vector<uint8_t> &in,
                               parc_info *fi = nullptr) {
     FILE *fin = file_of(in);
     FILE *fout = tmpfile();
-    parc_copts opts = {block_log, threads};
+    parc_copts opts = {block_log, threads, 0};
     EXPECT_EQ(parc_compress_stream(fin, fout, &opts, fi), PARC_OK);
     auto frame = slurp(fout);
     fclose(fin);
@@ -172,7 +172,7 @@ TEST(Mt, EmptyInput) {
 TEST(Mt, BadThreadCountRejected) {
     FILE *fin = file_of({});
     FILE *fout = tmpfile();
-    parc_copts copts = {12, PARC_THREADS_MAX + 1};
+    parc_copts copts = {12, PARC_THREADS_MAX + 1, 0};
     EXPECT_EQ(parc_compress_stream(fin, fout, &copts, nullptr), PARC_ERR_ARG);
     rewind(fin);
     parc_dopts dopts = {PARC_THREADS_MAX + 1};

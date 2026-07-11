@@ -101,8 +101,11 @@ parc_err parc_compress_stream(FILE *in, FILE *out, const parc_copts *opts,
     unsigned threads = opts ? opts->threads : 0;
     if (threads > PARC_THREADS_MAX)
         return PARC_ERR_ARG;
+    unsigned level = opts && opts->level ? opts->level : PARC_LEVEL_DEFAULT;
+    if (level > PARC_LEVEL_MAX)
+        return PARC_ERR_ARG;
     if (threads > 1)
-        return parc_frame_compress_mt(in, out, bl, threads, info);
+        return parc_frame_compress_mt(in, out, bl, threads, level, info);
     size_t bs = (size_t)1 << bl;
 
     parc_err err = PARC_ERR_NOMEM;
@@ -111,7 +114,7 @@ parc_err parc_compress_stream(FILE *in, FILE *out, const parc_copts *opts,
     parc_blk_cctx cx = {0};
     parc_buf index;
     parc_buf_init(&index);
-    if (!raw || !payload || parc_blk_cctx_init(&cx, bs) != PARC_OK)
+    if (!raw || !payload || parc_blk_cctx_init(&cx, bs, level) != PARC_OK)
         goto done;
 
     err = parc_frame_write_header(out, bl);

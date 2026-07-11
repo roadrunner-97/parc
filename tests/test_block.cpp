@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include "codec/block.h"
+#include "parc/parc.h"
 #include "gen.h"
 #include "util/buf.h"
 #include "util/rng.h"
@@ -24,9 +25,11 @@ std::vector<uint8_t> gen(parc_err (*g)(parc_rng *, size_t, parc_buf *),
 }
 
 // Compress one block; if packed, decompress and compare. Returns the type.
-int roundtrip(const std::vector<uint8_t> &in) {
+int roundtrip(const std::vector<uint8_t> &in,
+              unsigned level = PARC_LEVEL_DEFAULT) {
     parc_blk_cctx cx;
-    EXPECT_EQ(parc_blk_cctx_init(&cx, in.size()), PARC_OK);
+    EXPECT_EQ(parc_blk_cctx_init(&cx, in.size() ? in.size() : 1, level),
+              PARC_OK);
     std::vector<uint8_t> comp(in.size());
     uint32_t clen = 0;
     int type = parc_blk_compress(&cx, in.data(),
@@ -58,7 +61,8 @@ Packed make_packed() {
     Packed p;
     p.raw = gen(parc_gen_text, 7, 8192);
     parc_blk_cctx cx;
-    EXPECT_EQ(parc_blk_cctx_init(&cx, p.raw.size()), PARC_OK);
+    EXPECT_EQ(parc_blk_cctx_init(&cx, p.raw.size(), PARC_LEVEL_DEFAULT),
+              PARC_OK);
     p.comp.resize(p.raw.size());
     uint32_t clen = 0;
     EXPECT_EQ(parc_blk_compress(&cx, p.raw.data(),
@@ -93,6 +97,37 @@ TEST(Block, BoundarySizesRoundtrip) {
                      size_t{4095}, size_t{4096}, size_t{4097}})
         for (auto g : {parc_gen_random, parc_gen_text, parc_gen_json_log})
             roundtrip(gen(g, 9 + n, n));  // roundtrip() asserts equality
+}
+
+TEST(Block, AllLevelsRoundtrip) {
+    // Every level must produce a decoder-valid block for every input; higher
+    // levels only change which matches are found, never correctness.
+    for (unsigned lvl = PARC_LEVEL_MIN; lvl <= PARC_LEVEL_MAX; ++lvl)
+        for (auto g : {parc_gen_random, parc_gen_text, parc_gen_json_log})
+            for (size_t n : {size_t{1}, size_t{4}, size_t{5}, size_t{63},
+                             size_t{4096}, size_t{4097}, size_t{65536}})
+                roundtrip(gen(g, 100 + n, n), lvl);  // asserts equality
+}
+
+TEST(Block, HigherLevelsNeverBeatWorseThanGreedy) {
+    // On compressible text, a deeper search must not produce a larger packed
+    // payload than the greedy level-1 matcher.
+    auto in = gen(parc_gen_text, 55, 200000);
+    auto packed_len = [&](unsigned level) -> uint32_t {
+        parc_blk_cctx cx;
+        EXPECT_EQ(parc_blk_cctx_init(&cx, in.size(), level), PARC_OK);
+        std::vector<uint8_t> comp(in.size());
+        uint32_t clen = 0;
+        EXPECT_EQ(parc_blk_compress(&cx, in.data(),
+                                    static_cast<uint32_t>(in.size()),
+                                    comp.data(), &clen),
+                  PARC_BLK_PACKED);
+        parc_blk_cctx_free(&cx);
+        return clen;
+    };
+    uint32_t greedy = packed_len(1);
+    EXPECT_LE(packed_len(6), greedy);
+    EXPECT_LE(packed_len(9), greedy);
 }
 
 TEST(Block, MaxDistanceAndLongMatch) {

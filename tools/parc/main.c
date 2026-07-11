@@ -27,6 +27,8 @@ static void usage(FILE *to)
         "options:\n"
         "  -b, --block-log N  compress with max block size 2^N bytes,\n"
         "                     N in 12..24 (default 20 = 1 MiB)\n"
+        "  -L, --level N      compression level N in 1..9 (default 3);\n"
+        "                     higher is smaller but slower\n"
         "  -T, --threads N    use N worker threads (0 = one per CPU;\n"
         "                     default 1)\n"
         "  -o, --out FILE     write to FILE instead of stdout\n"
@@ -65,7 +67,7 @@ int main(int argc, char **argv)
 {
     enum { CMD_NONE, CMD_C, CMD_D, CMD_T } cmd = CMD_NONE;
     const char *in_path = NULL, *out_path = NULL;
-    parc_copts copts = {0, 0};
+    parc_copts copts = {0, 0, 0};
     unsigned threads = 1;
     int verbose = 0;
 
@@ -81,6 +83,13 @@ int main(int argc, char **argv)
             if (++i >= argc || parse_uint(argv[i], &copts.block_log) != 0 ||
                 copts.block_log < 12 || copts.block_log > 24) {
                 fputs("parc: -b needs an integer in 12..24\n", stderr);
+                return 2;
+            }
+        } else if (strcmp(a, "-L") == 0 || strcmp(a, "--level") == 0) {
+            if (++i >= argc || parse_uint(argv[i], &copts.level) != 0 ||
+                copts.level < 1 || copts.level > PARC_LEVEL_MAX) {
+                fprintf(stderr, "parc: -L needs an integer in %d..%d\n",
+                        PARC_LEVEL_MIN, PARC_LEVEL_MAX);
                 return 2;
             }
         } else if (strcmp(a, "-T") == 0 || strcmp(a, "--threads") == 0) {
@@ -123,6 +132,10 @@ int main(int argc, char **argv)
     }
     if (cmd != CMD_C && copts.block_log != 0) {
         fputs("parc: -b only applies to compress\n", stderr);
+        return 2;
+    }
+    if (cmd != CMD_C && copts.level != 0) {
+        fputs("parc: -L only applies to compress\n", stderr);
         return 2;
     }
     if (cmd == CMD_T && out_path != NULL) {
