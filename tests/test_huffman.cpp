@@ -165,6 +165,50 @@ TEST(HuffDec, DegenerateCodeRejectsOneBit) {
     EXPECT_EQ(parc_hdec_get(&d, &r), -1);  // 1 bit matches no code
 }
 
+TEST(HuffDec, LongCodesDecodeViaFallback) {
+    // Fibonacci weights give codes spanning the root-table boundary
+    // (PARC_HDEC_ROOT_BITS): short codes hit the direct table, codes up to 15
+    // bits take the bit-serial fallback. Emit every symbol so both paths run.
+    unsigned n = 40;
+    std::vector<uint32_t> freq(n);
+    uint32_t a = 1, b = 1;
+    for (auto &f : freq) {
+        f = a;
+        uint32_t next = a + b;
+        a = b;
+        b = next;
+    }
+    uint8_t lens[64];
+    parc_huff_lens(freq.data(), n, lens);
+    unsigned maxlen = 0;
+    for (unsigned s = 0; s < n; ++s) maxlen = std::max(maxlen, unsigned{lens[s]});
+    ASSERT_GT(maxlen, unsigned{PARC_HDEC_ROOT_BITS}) << "need long codes";
+
+    parc_henc e;
+    parc_henc_init(&e, lens, n);
+    parc_hdec d;
+    ASSERT_EQ(parc_hdec_init(&d, lens, n), PARC_OK);
+
+    std::vector<uint16_t> msg;
+    for (unsigned s = 0; s < n; ++s)
+        for (int r = 0; r < 3; ++r) msg.push_back(static_cast<uint16_t>(s));
+
+    std::vector<uint8_t> bits(4 * msg.size() + 16);
+    parc_bw w;
+    parc_bw_init(&w, bits.data(), bits.size());
+    for (auto m : msg) parc_henc_put(&e, &w, m);
+    size_t nbytes = 0;
+    ASSERT_EQ(parc_bw_finish(&w, &nbytes), PARC_OK);
+
+    parc_br r;
+    parc_br_init(&r, bits.data(), nbytes);
+    for (size_t i = 0; i < msg.size(); ++i)
+        ASSERT_EQ(parc_hdec_get(&d, &r), msg[i]) << "token " << i;
+    EXPECT_EQ(parc_br_err(&r), PARC_OK);
+    // exact consumption: no bits over- or under-read
+    EXPECT_EQ((parc_br_bits_consumed(&r) + 7) / 8, nbytes);
+}
+
 TEST(Huff, EncodeDecodeRoundtrip) {
     parc_rng rng;
     parc_rng_seed(&rng, 0xC0DEC);

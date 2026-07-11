@@ -19,6 +19,10 @@ extern "C" {
 enum {
     PARC_HUFF_MAX_SYMS = 282, /* main alphabet size; dist alphabet is 25 */
     PARC_HUFF_MAX_LEN = 15,
+    /* Fast decode indexes a direct table on the first this-many code bits;
+     * codes longer than this (rare, by construction rare symbols) fall back
+     * to a bit-serial walk. Bounds the decoder's table to 1 << this. */
+    PARC_HDEC_ROOT_BITS = 11,
 };
 
 /* Compute code lengths for freq[0..n), n in [1, PARC_HUFF_MAX_SYMS].
@@ -52,7 +56,15 @@ typedef struct parc_hdec {
     uint16_t first[PARC_HUFF_MAX_LEN + 1];  /* first canonical code of len */
     uint16_t offset[PARC_HUFF_MAX_LEN + 1]; /* index into syms for that len */
     uint16_t syms[PARC_HUFF_MAX_SYMS];      /* symbols in canonical order */
-    uint16_t nsyms; /* number of present symbols; 0 = empty table */
+    uint16_t nsyms;   /* number of present symbols; 0 = empty table */
+    uint8_t maxlen;   /* longest present code; 0 iff empty */
+    uint8_t root_bits; /* direct-table width = min(maxlen, ROOT_BITS) */
+    /* Fast path: index by the next root_bits stream bits. Each cell packs
+     * (symbol << 4) | len for a code of len <= root_bits; len == 0 means no
+     * code (reject), the sentinel len means "longer than root_bits, walk
+     * bit-serially". Codes' MSB-first wire order is baked in (bit-reversed),
+     * matching the encoder in parc_henc_init. */
+    uint16_t tbl[1u << PARC_HDEC_ROOT_BITS];
 } parc_hdec;
 
 /* Validate lens[0..n) per FORMAT.md §2.3 (complete, degenerate, or empty)

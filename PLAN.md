@@ -51,9 +51,21 @@ fuzzes level too; full matrix green incl. TSan; roundtrip fuzz smoke clean.
 enwik8 single-threaded: the default (L3) ratio is 0.348 — past zstd-3 (0.354)
 and zlib-6 (0.365) — vs the old greedy 0.403, at 49 MiB/s compress (L1 0.403
 @ 170, L6 0.339 @ 11, L9 0.336 @ 3.9). Bench gained `parc-0-L{1,6,9}`
-entries. Decompression is unchanged (~180 MiB/s, still bit-serial Huffman) —
-the next Phase 5 lever: table-based decode + FSE. Next: decode speed, then
-FSE/tANS + repeat-offset codes (a v1 format bump).
+entries.
+Then the decode gap: the bit-serial Huffman walk (up to 15 branchy bit-reads
+per symbol) became a direct root table. `parc_hdec` indexes the next
+`root_bits = min(maxlen, 11)` stream bits into a table of packed
+`(symbol << 4) | len` cells; codes longer than 11 bits (rare, by
+construction rare symbols) fall back to the old bit-serial walk. A new
+`parc_br_peek` reads the max code width without consuming (zero-fills past
+end, never fails), then `parc_br_get` consumes the resolved length — so exact
+bit-accounting (minimal `comp_len`, zero padding, truncation) is preserved.
+Decoder-internal, no format change: golden fixtures decode bit-identically.
+Correctness rides the rig plus a long-code fallback test and a peek unit
+test; 87k corrupt-input decode-fuzz execs clean; full matrix green incl.
+TSan. Single-threaded decode is ~1.5x faster (enwik8 173 -> 261 MiB/s,
+webster 205 -> 311, xml 543 -> 820). Next Phase 5 levers: FSE/tANS +
+repeat-offset codes (a v1 format bump), then wider/faster decode.
 
 Phases are ordered so that measurement exists before the codec does, and
 correctness is locked in before performance work starts. Each phase ends green:

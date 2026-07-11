@@ -117,6 +117,35 @@ TEST(Bitstream, ReaderOverrunIsStickyReturnsZero) {
     EXPECT_EQ(parc_br_err(&r), PARC_ERR_TRUNCATED);
 }
 
+TEST(Bitstream, PeekDoesNotConsumeAndZeroFillsPastEnd) {
+    // Two bytes: 0x9D 0x01. LSB-first, 0x9D = bits 1,0,1,1,1,0,0,1.
+    const uint8_t buf[2] = {0x9D, 0x01};
+    parc_br r;
+    parc_br_init(&r, buf, sizeof buf);
+
+    // peek is idempotent and does not advance bits_consumed
+    EXPECT_EQ(parc_br_peek(&r, 4), 0xDu);  // low 4 bits of 0x9D = 1101b
+    EXPECT_EQ(parc_br_peek(&r, 4), 0xDu);
+    EXPECT_EQ(parc_br_bits_consumed(&r), 0u);
+    EXPECT_EQ(parc_br_err(&r), PARC_OK);
+
+    // consume matches what was peeked, then peek reflects the new position
+    EXPECT_EQ(parc_br_get(&r, 4), 0xDu);
+    EXPECT_EQ(parc_br_bits_consumed(&r), 4u);
+    EXPECT_EQ(parc_br_peek(&r, 8), (0x1u << 4) | 0x9u);  // hi nibble of b0 + b1
+
+    // peeking past the end zero-fills the missing high bits and never fails
+    parc_br r2;
+    parc_br_init(&r2, buf, 1);  // only 0x9D available
+    EXPECT_EQ(parc_br_peek(&r2, 12), 0x9Du);  // 8 real bits, 4 zero-filled
+    EXPECT_EQ(parc_br_err(&r2), PARC_OK);
+    EXPECT_EQ(parc_br_bits_consumed(&r2), 0u);
+    // the real bits are still consumable; the fill bits are not
+    EXPECT_EQ(parc_br_get(&r2, 8), 0x9Du);
+    EXPECT_EQ(parc_br_get(&r2, 1), 0u);  // past end -> fails
+    EXPECT_EQ(parc_br_err(&r2), PARC_ERR_TRUNCATED);
+}
+
 TEST(Bitstream, ZeroWidthPutGetAreNoOps) {
     uint8_t buf[2];
     parc_bw w;

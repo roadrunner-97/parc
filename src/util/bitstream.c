@@ -107,6 +107,24 @@ uint64_t parc_br_get(parc_br *r, unsigned n)
     return val;
 }
 
+uint64_t parc_br_peek(parc_br *r, unsigned n)
+{
+    assert(n <= PARC_BITSTREAM_MAX_BITS);
+
+    if (n == 0 || r->failed)
+        return 0;
+
+    /* Buffer up to n bits without consuming. Loading a byte raises pos and
+     * nbits together, so bits_consumed (pos*8 - nbits) is unchanged. Bits
+     * past the end stay 0 in acc's high positions, so they read as 0. */
+    while (r->nbits < n && r->pos < r->len) {
+        r->acc |= (uint64_t)r->src[r->pos] << r->nbits;
+        r->pos++;
+        r->nbits += 8;
+    }
+    return r->acc & ((UINT64_C(1) << n) - 1);
+}
+
 parc_err parc_br_err(const parc_br *r)
 {
     return r->failed ? PARC_ERR_TRUNCATED : PARC_OK;

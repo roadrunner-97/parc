@@ -8,6 +8,14 @@
  * KRAFT_ONE. */
 #define KRAFT_ONE (1u << PARC_HUFF_MAX_LEN)
 
+/* Decode-table cell = (symbol << 4) | len-nibble. Direct codes carry their
+ * true length (1..PARC_HDEC_ROOT_BITS) in the nibble; two nibble values that
+ * a direct length can never take are reserved: */
+#define HDEC_INVALID_NIB 0u  /* no code with this prefix -> reject */
+#define HDEC_LONG_NIB 15u    /* code longer than root_bits -> bit-serial walk */
+#define HDEC_INVALID ((uint16_t)HDEC_INVALID_NIB)
+#define HDEC_LONG ((uint16_t)HDEC_LONG_NIB)
+
 /* ---- code length computation ---- */
 
 /* Build an exact (unlimited-depth) Huffman tree over the nused sorted leaf
@@ -166,6 +174,8 @@ parc_err parc_hdec_init(parc_hdec *d, const uint8_t *lens, unsigned n)
     assert(n <= PARC_HUFF_MAX_SYMS);
     memset(d->count, 0, sizeof d->count);
     d->nsyms = 0;
+    d->maxlen = 0;
+    d->root_bits = 0;
 
     uint32_t kraft = 0;
     uint8_t only_len = 0;
@@ -200,17 +210,63 @@ parc_err parc_hdec_init(parc_hdec *d, const uint8_t *lens, unsigned n)
     for (unsigned s = 0; s < n; ++s)
         if (lens[s])
             d->syms[pos[lens[s]]++] = (uint16_t)s;
+
+    unsigned maxlen = PARC_HUFF_MAX_LEN;
+    while (maxlen > 0 && d->count[maxlen] == 0)
+        --maxlen;
+    d->maxlen = (uint8_t)maxlen;
+    unsigned rb = maxlen < PARC_HDEC_ROOT_BITS ? maxlen : PARC_HDEC_ROOT_BITS;
+    d->root_bits = (uint8_t)rb;
+
+    /* Build the direct table. Cells default to HDEC_INVALID (no code). Each
+     * present code fills either every cell sharing its bit-reversed value in
+     * the low `len` bits (len <= rb), or the single root cell of its prefix,
+     * marked HDEC_LONG for the bit-serial fallback (len > rb). A prefix-free
+     * code guarantees these two never target the same cell. */
+    for (uint32_t i = 0; i < (1u << rb); ++i)
+        d->tbl[i] = HDEC_INVALID;
+    for (unsigned len = 1; len <= maxlen; ++len) {
+        uint16_t code = d->first[len];
+        for (unsigned i = 0; i < d->count[len]; ++i, ++code) {
+            uint16_t sym = d->syms[d->offset[len] + i];
+            if (len <= rb) {
+                uint16_t rev = bit_reverse(code, len);
+                uint16_t entry = (uint16_t)(((unsigned)sym << 4) | len);
+                for (uint32_t k = 0; k < (1u << (rb - len)); ++k)
+                    d->tbl[rev | (k << len)] = entry;
+            } else {
+                uint16_t top = (uint16_t)(code >> (len - rb));
+                d->tbl[bit_reverse(top, rb)] = HDEC_LONG;
+            }
+        }
+    }
     return PARC_OK;
 }
 
-int parc_hdec_get(const parc_hdec *d, parc_br *r)
+/* Bit-serial resolve for codes longer than root_bits (the reference walk,
+ * matching the canonical assignment). Returns the symbol or -1. */
+static int hdec_long(const parc_hdec *d, parc_br *r)
 {
     uint32_t code = 0;
-    for (unsigned l = 1; l <= PARC_HUFF_MAX_LEN; ++l) {
+    for (unsigned l = 1; l <= d->maxlen; ++l) {
         code = (code << 1) | (uint32_t)parc_br_get(r, 1);
         if (d->count[l] && code >= d->first[l] &&
             code - d->first[l] < d->count[l])
             return d->syms[d->offset[l] + (code - d->first[l])];
     }
     return -1;
+}
+
+int parc_hdec_get(const parc_hdec *d, parc_br *r)
+{
+    uint16_t e = d->tbl[parc_br_peek(r, d->root_bits)];
+    unsigned len = e & 0xF;
+    if (len == HDEC_INVALID_NIB)
+        return -1; /* no code with this prefix */
+    if (len == HDEC_LONG_NIB)
+        return hdec_long(d, r);
+    /* consume the code's bits; get fails (sets r->failed) if they run past
+     * the end, which the caller checks. */
+    (void)parc_br_get(r, len);
+    return e >> 4;
 }

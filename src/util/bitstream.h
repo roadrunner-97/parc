@@ -70,6 +70,14 @@ void parc_br_init(parc_br *r, const uint8_t *src, size_t len);
  * them is not an error.) */
 uint64_t parc_br_get(parc_br *r, unsigned n);
 
+/* Return the next n bits (LSB-first) without consuming them, n in
+ * [0, PARC_BITSTREAM_MAX_BITS]. Bits past the end of the buffer read as 0 and
+ * do NOT mark the stream failed (a peek never fails); consume the ones you
+ * use with parc_br_get, which fails if they run past the end. Returns 0 if
+ * the stream is already failed. Intended for length-prefixed table decode:
+ * peek the maximum code width, look up the true width, then get it. */
+uint64_t parc_br_peek(parc_br *r, unsigned n);
+
 /* PARC_OK, or PARC_ERR_TRUNCATED if any get overran the buffer. */
 parc_err parc_br_err(const parc_br *r);
 
