@@ -90,6 +90,34 @@ TEST(Stats, UniformRandomLooksUniform) {
     EXPECT_NEAR(parc_stats_serial_corr(s.st), 0.0, 0.01);
 }
 
+TEST(Stats, MillerMadowLiftsUndersampledO1) {
+    // A few-KiB random buffer under-fills the 65536 pair contexts, so the raw
+    // plugin order-1 entropy collapses far below the true ~8 bits. The
+    // Miller-Madow correction must pull the estimate up substantially without
+    // ever crossing the 8 bit ceiling.
+    StatsPtr s;
+    auto v = random_bytes(4096, 99);
+    parc_stats_update(s.st, v.data(), v.size());
+    double o1 = parc_stats_entropy_o1(s.st);
+    EXPECT_GT(o1, 4.0);   // raw plugin lands near 3.9; correction adds ~0.7
+    EXPECT_LE(o1, 8.0);   // never exceeds the ceiling
+
+    // The correction is exactly zero when every context has a single observed
+    // successor (m_XY == m_X), so deterministic structure still reads as 0.
+    StatsPtr ramp;
+    std::vector<uint8_t> r(65536);
+    for (size_t i = 0; i < r.size(); ++i) r[i] = uint8_t(i & 0xFF);
+    parc_stats_update(ramp.st, r.data(), r.size());
+    EXPECT_NEAR(parc_stats_entropy_o1(ramp.st), 0.0, 1e-9);
+
+    // Well-sampled uniform data sits right at the ceiling after clamping.
+    StatsPtr big;
+    auto b = random_bytes(8u << 20, 100);
+    parc_stats_update(big.st, b.data(), b.size());
+    EXPECT_GT(parc_stats_entropy_o1(big.st), 7.99);
+    EXPECT_LE(parc_stats_entropy_o1(big.st), 8.0);
+}
+
 TEST(Stats, MonteCarloPiOnUniform) {
     StatsPtr s;
     auto v = random_bytes(6u << 20, 7);  // 1M points

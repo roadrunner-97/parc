@@ -67,6 +67,11 @@ tests written first, subagent implements until green, result reviewed).
   Validated against `ent` on identical inputs and against analytically known
   distributions (uniform random = 8.000 bits/byte, constant = 0, biased coin =
   closed-form).
+  Order-1 entropy carries a Miller-Madow bias correction so small samples
+  (a few-KiB random file under-fills the 65536 pair contexts) don't read as
+  false structure; it's first-order, so deep undersampling is only reduced,
+  not removed. *Future:* if that residual bias bites, upgrade the order-1 (and
+  order-2) estimator to NSB or Chao-Shen for near-unbiased entropy at small N.
 - `parcgen` synthetic corpus generators (seeded, reproducible), each generator
   validated by `parcent` (generator asked for ~4.0 bits/byte must measure so).
 - Corpus fetcher script (Silesia, Canterbury, enwik8; checksum-verified cache)

@@ -46,7 +46,10 @@ double parc_stats_entropy_o0(const parc_stats *st);
 
 /* Order-1 conditional entropy H(X_n | X_{n-1}) in bits/byte, computed from
  * the (previous byte, next byte) pair counts: sum over contexts c of
- * (count_c / total_pairs) * H(next | c). Fewer than 2 bytes -> 0.0. */
+ * (count_c / total_pairs) * H(next | c), with a Miller-Madow bias correction
+ * of (m_XY - m_X) / (2N ln2) bits added (m_X = distinct prev bytes, m_XY =
+ * distinct pairs, N = pair count) and clamped to the 8 bit ceiling. Fewer
+ * than 2 bytes -> 0.0. */
 double parc_stats_entropy_o1(const parc_stats *st);
 
 /* Min-entropy in bits/byte: -log2(max_i p_i). Empty input -> 0.0. */

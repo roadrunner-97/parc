@@ -4,6 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef M_LN2
+#define M_LN2 0.69314718055994530942
+#endif
+
 /* Streaming statistical accumulator. All state needed to make every result
  * independent of update chunking lives here: the order-1 pair table plus a
  * carried "previous byte", running sums for serial correlation, and a
@@ -169,21 +173,35 @@ double parc_stats_entropy_o1(const parc_stats *st)
 
     double total_pairs = (double)(st->n - 1);
     double h = 0.0;
+    size_t contexts = 0;      /* distinct prev bytes seen (m_X)      */
+    size_t distinct_pairs = 0; /* distinct (prev, next) pairs (m_XY)  */
     for (size_t c = 0; c < 256; ++c) {
         uint64_t row_sum = 0;
         for (size_t b = 0; b < 256; ++b)
             row_sum += st->pair[c][b];
         if (row_sum == 0)
             continue;
+        contexts++;
         double rn = (double)row_sum;
         for (size_t b = 0; b < 256; ++b) {
             if (st->pair[c][b] == 0)
                 continue;
+            distinct_pairs++;
             double p = (double)st->pair[c][b] / rn;
             h -= (rn / total_pairs) * p * log2(p);
         }
     }
-    return h;
+
+    /* Miller-Madow bias correction. The plugin estimate above is biased low
+     * because unobserved (prev, next) transitions look more predictable than
+     * they are; the leading-order fix adds (m_XY - m_X) / (2N) nats, i.e. the
+     * per-context (m_c - 1)/(2N_c) terms weighted by N_c/N. Converted to bits
+     * and bounded above by 1/(2 ln2) ~ 0.72, this vanishes as N grows but
+     * lifts the deep-undersampling readings (e.g. a few-KiB random file, where
+     * the raw estimate collapses toward zero). Clamp at the 8 bit ceiling,
+     * which a well-sampled estimate can otherwise exceed by a rounding hair. */
+    h += (double)(distinct_pairs - contexts) / (2.0 * total_pairs) / M_LN2;
+    return h > 8.0 ? 8.0 : h;
 }
 
 double parc_stats_min_entropy(const parc_stats *st)
