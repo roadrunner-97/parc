@@ -6,6 +6,13 @@
 #define HASH_SIZE (1u << PARC_LZ_HASH_BITS)
 #define NO_POS UINT32_MAX
 
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
+    __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define PARC_LZ_LITTLE_ENDIAN 1
+#else
+#define PARC_LZ_LITTLE_ENDIAN 0
+#endif
+
 static uint32_t read32(const uint8_t *p)
 {
     uint32_t v;
@@ -13,9 +20,43 @@ static uint32_t read32(const uint8_t *p)
     return v;
 }
 
+static uint64_t read64(const uint8_t *p)
+{
+    uint64_t v;
+    memcpy(&v, p, 8); /* native load; only ever compared to another read64 */
+    return v;
+}
+
 static uint32_t hash4(uint32_t v)
 {
     return (v * 2654435761u) >> (32 - PARC_LZ_HASH_BITS);
+}
+
+/* Length of the common prefix of src[a..] and src[b..], capped at max bytes.
+ * Requires a <= b and b + max <= n so every wide load stays in the buffer.
+ *
+ * The body compares 8 bytes at a time: XOR two native-order words, and the
+ * first differing byte is the lowest-address set byte — the low byte on
+ * little-endian (count trailing zero bits) or the high byte on big-endian
+ * (count leading zero bits). A byte-wise tail finishes the last < 8 bytes.
+ * Bit-identical to the byte-at-a-time compare it replaces. */
+static size_t match_len(const uint8_t *src, size_t a, size_t b, size_t max)
+{
+    size_t l = 0;
+    while (l + 8 <= max) {
+        uint64_t x = read64(src + a + l) ^ read64(src + b + l);
+        if (x) {
+#if PARC_LZ_LITTLE_ENDIAN
+            return l + ((size_t)__builtin_ctzll(x) >> 3);
+#else
+            return l + ((size_t)__builtin_clzll(x) >> 3);
+#endif
+        }
+        l += 8;
+    }
+    while (l < max && src[a + l] == src[b + l])
+        ++l;
+    return l;
 }
 
 size_t parc_lz_greedy(const uint8_t *src, size_t n, parc_tok *toks,
@@ -41,9 +82,8 @@ size_t parc_lz_greedy(const uint8_t *src, size_t n, parc_tok *toks,
             continue;
         }
 
-        size_t len = PARC_LZ_MIN_MATCH;
-        while (i + len < n && src[cand + len] == src[i + len])
-            ++len;
+        /* First 4 bytes already matched above, so len >= MIN_MATCH. */
+        size_t len = match_len(src, cand, i, n - i);
         toks[nt].dist = (uint32_t)(i - cand);
         toks[nt].len_or_lit = (uint32_t)len;
         ++nt;
@@ -105,9 +145,7 @@ static uint32_t longest_match(const uint8_t *src, size_t n, size_t i,
         /* best < max_len always holds here (we break when best reaches
          * max_len), so src[i + best] and src[cand + best] are in bounds. */
         if (src[cand + best] == src[i + best]) {
-            size_t l = 0;
-            while (l < max_len && src[cand + l] == src[i + l])
-                ++l;
+            size_t l = match_len(src, cand, i, max_len);
             if (l > best) {
                 best = l;
                 best_dist = (uint32_t)(i - cand);

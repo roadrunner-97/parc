@@ -294,16 +294,82 @@ parc_err parc_fse_decode(parc_br *r, const parc_fdec *d, uint8_t *out,
 {
     if (count == 0)
         return PARC_OK;
+    if (r->failed)
+        return PARC_ERR_TRUNCATED;
 
-    uint32_t state = (uint32_t)parc_br_get(r, d->table_log);
-    for (size_t i = 0; i < count; ++i) {
+    /* Local reader: hold acc/nbits/pos in registers across the whole loop and
+     * top up from one 64-bit load per several symbols, instead of paying a
+     * full parc_br_get (avail multiply + sticky-error branch + refill) per
+     * symbol. table_log <= 12, so one >= 57-bit refill feeds >= 4 symbols and
+     * the per-symbol cost drops to a table lookup, a shift, and one `nbits <
+     * nb` compare. Bit-exact with the byte-at-a-time reader: the same whole
+     * bytes are pulled in the same order, and (pos*8 - nbits) tracks
+     * bits_consumed identically, so the written-back reader state is what the
+     * original per-get path would have left for the downstream streams. The
+     * sticky-error contract lets us test truncation once (per refill) rather
+     * than per get. */
+    const uint8_t *src = r->src;
+    size_t len = r->len;
+    size_t pos = r->pos;
+    uint64_t acc = r->acc;
+    unsigned nbits = r->nbits;
+    unsigned tl = d->table_log;
+    int trunc = 0;
+
+    /* Ensure >= (need) bits (need <= tl <= 12) are buffered in acc, mirroring
+     * parc_br_fill; if the buffer runs dry first, flag truncation. */
+#define FSE_REFILL(need)                                                       \
+    do {                                                                       \
+        if (nbits < (need)) {                                                  \
+            if (pos + 8 <= len) {                                              \
+                uint64_t word_ = parc_bs_read_le64(src + pos);                 \
+                unsigned take_ = (64u - nbits) >> 3;                           \
+                if (take_ < 8)                                                 \
+                    word_ &= (UINT64_C(1) << (take_ * 8)) - 1;                 \
+                acc |= word_ << nbits;                                         \
+                pos += take_;                                                  \
+                nbits += take_ * 8;                                            \
+            } else {                                                           \
+                while (nbits < (need) && pos < len) {                          \
+                    acc |= (uint64_t)src[pos] << nbits;                        \
+                    pos++;                                                     \
+                    nbits += 8;                                                \
+                }                                                              \
+                if (nbits < (need))                                            \
+                    trunc = 1;                                                 \
+            }                                                                  \
+        }                                                                      \
+    } while (0)
+
+    FSE_REFILL(tl);
+    uint32_t state = (uint32_t)(acc & ((UINT64_C(1) << tl) - 1));
+    acc >>= tl;
+    nbits -= tl;
+
+    for (size_t i = 0; !trunc && i < count; ++i) {
         out[i] = d->symbol[state];
         if (i + 1 < count) {
             unsigned nb = d->nbits[state];
-            uint32_t low = (uint32_t)parc_br_get(r, nb);
+            FSE_REFILL(nb);
+            if (trunc)
+                break;
+            /* nb <= table_log <= 12, so the mask is well-defined; nb == 0
+             * yields low == 0 with no branch. */
+            uint32_t low = (uint32_t)(acc & ((UINT64_C(1) << nb) - 1));
+            acc >>= nb;
+            nbits -= nb;
             state = (uint32_t)d->new_state[state] + low;
         }
     }
-    return parc_br_err(r);
+#undef FSE_REFILL
+
+    r->pos = pos;
+    r->acc = acc;
+    r->nbits = nbits;
+    if (trunc) {
+        r->failed = 1;
+        return PARC_ERR_TRUNCATED;
+    }
+    return PARC_OK;
 }
 

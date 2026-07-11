@@ -44,6 +44,37 @@ static uint32_t bucket_val(parc_br *r, unsigned b)
     return (1u << (b - 1)) + (uint32_t)parc_br_get(r, b - 1);
 }
 
+/* Copy an LZ match: dst[pos+k] = dst[pos+k-dist] for k in [0, len). Callers
+ * must have validated dist <= pos and pos + len <= raw_len, so both the source
+ * and destination ranges lie inside the block buffer.
+ *
+ * Overlapping matches (dist < len) produce a run that repeats with period
+ * dist, so a plain memcpy/memmove is wrong. Instead we seed one period, then
+ * grow the written run by doubling it: as long as the already-written prefix
+ * length is a multiple of dist, copying it forward reproduces the pattern
+ * exactly, and each copy is a bulk memcpy of non-overlapping ranges. This
+ * replaces the byte-at-a-time loop that dominates LZ decode. */
+static void copy_match(uint8_t *dst, uint32_t pos, uint32_t dist, uint32_t len)
+{
+    uint8_t *d = dst + pos;
+    const uint8_t *s = d - dist;
+    if (dist >= len) {
+        /* No overlap: source range is entirely before d. */
+        memcpy(d, s, len);
+        return;
+    }
+    /* Seed one period (adjacent, non-overlapping: s + dist == d). */
+    memcpy(d, s, dist);
+    uint32_t filled = dist;
+    while (filled < len) {
+        /* filled is always a multiple of dist here, so d[0..chunk) is a valid
+         * prefix of the output; chunk <= filled keeps the ranges disjoint. */
+        uint32_t chunk = filled < len - filled ? filled : len - filled;
+        memcpy(d + filled, d, chunk);
+        filled += chunk;
+    }
+}
+
 /* ---- context lifecycle ---- */
 
 parc_err parc_blk_cctx_init(parc_blk_cctx *cx, size_t max_block, unsigned level,
@@ -242,9 +273,7 @@ static parc_err blk_decompress_v0(const uint8_t *comp, uint32_t comp_len,
             return PARC_ERR_CORRUPT;
         if (dist > pos || len > raw_len - pos)
             return PARC_ERR_CORRUPT;
-        /* byte-by-byte: overlapping copies (dist < len) must repeat */
-        for (uint32_t k = 0; k < len; ++k)
-            dst[pos + k] = dst[pos + k - dist];
+        copy_match(dst, pos, dist, len);
         pos += len;
     }
 
@@ -447,8 +476,7 @@ static parc_err blk_decompress_v1(parc_blk_dctx *dx, const uint8_t *comp,
         uint32_t dist = dx->dist[i], m = dx->ml[i];
         if (dist > pos || m > raw_len - pos)
             return PARC_ERR_CORRUPT;
-        for (uint32_t k = 0; k < m; ++k)
-            dst[pos + k] = dst[pos + k - dist];
+        copy_match(dst, pos, dist, m);
         pos += m;
     }
     uint32_t tail = nlit - li;
