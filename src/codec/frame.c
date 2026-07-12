@@ -110,14 +110,22 @@ parc_err parc_frame_check_trailer(FILE *in, const parc_buf *seen,
 parc_err parc_compress_stream(FILE *in, FILE *out, const parc_copts *opts,
                               parc_info *info)
 {
-    unsigned bl = opts && opts->block_log ? opts->block_log : BLOCK_LOG_DEFAULT;
-    if (bl < BLOCK_LOG_MIN || bl > BLOCK_LOG_MAX)
-        return PARC_ERR_ARG;
     unsigned threads = opts ? opts->threads : 0;
     if (threads > PARC_THREADS_MAX)
         return PARC_ERR_ARG;
     unsigned level = opts && opts->level ? opts->level : PARC_LEVEL_DEFAULT;
     if (level > PARC_LEVEL_MAX)
+        return PARC_ERR_ARG;
+    /* The block is the match window (matches are block-local, docs/FORMAT.md),
+     * so the default block size grows with level: fast levels keep the small
+     * 1 MiB window (they don't exploit a larger one and it costs memory and
+     * speed), higher levels widen it to 4 MiB for more and longer matches. An
+     * explicit opts->block_log overrides this. */
+    unsigned bl = opts && opts->block_log
+                      ? opts->block_log
+                      : (level >= BLOCK_LOG_HIGH_LEVEL ? BLOCK_LOG_DEFAULT_HIGH
+                                                       : BLOCK_LOG_DEFAULT);
+    if (bl < BLOCK_LOG_MIN || bl > BLOCK_LOG_MAX)
         return PARC_ERR_ARG;
     int version = wire_version(opts ? opts->format : PARC_FORMAT_DEFAULT);
     if (version < 0)

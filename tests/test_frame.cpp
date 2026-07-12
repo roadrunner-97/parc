@@ -136,6 +136,29 @@ TEST(Frame, MultiBlockAtDefaultBlockSize) {
     EXPECT_EQ(out, in);
 }
 
+// The default block size (the match window) scales with level: levels 1-3
+// keep block_log 20 (1 MiB), levels 4-9 widen to 22 (4 MiB). The same ~3.14
+// MiB input that spans 4 blocks at the low default fits in 1 at the high one.
+TEST(Frame, DefaultBlockSizeWidensWithLevel) {
+    auto in = gen(parc_gen_json_log, 33, (3u << 20) + 12345);
+    // Exercise the exact policy boundary (last low level, first high level).
+    for (auto [level, want_blocks] : {std::pair{3u, 4u}, {4u, 1u}}) {
+        FILE *fin = file_of(in);
+        FILE *fout = tmpfile();
+        parc_copts opts = {0, 0, level, PARC_FORMAT_DEFAULT};  // block_log 0 = default
+        parc_info fi;
+        ASSERT_EQ(parc_compress_stream(fin, fout, &opts, &fi), PARC_OK)
+            << "level " << level;
+        EXPECT_EQ(fi.blocks, want_blocks) << "level " << level;
+        auto frame = slurp(fout);
+        fclose(fin);
+        fclose(fout);
+        std::vector<uint8_t> out;
+        ASSERT_EQ(decompress(frame, &out), PARC_OK) << "level " << level;
+        EXPECT_EQ(out, in) << "level " << level;
+    }
+}
+
 TEST(Frame, EmptyInput) {
     parc_info ci, di;
     auto frame = compress({}, 12, &ci);

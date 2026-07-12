@@ -33,10 +33,11 @@ extern "C" {
 #define PARC_FORMAT_V1 2 /* FSE sequence model + repeat offsets (latest) */
 
 typedef struct parc_copts {
-    /* log2 of the maximum block size: 0 for the default (20 → 1 MiB),
-     * else 12..24. Larger blocks improve ratio (matches are block-local)
-     * at the cost of memory: compression uses ~10x block size (~14x at
-     * chain levels, see level), decompression ~2x. */
+    /* log2 of the maximum block size: 0 for the default, else 12..24. The
+     * default depends on level (the block is the match window): 20 (1 MiB)
+     * for levels 1..3, 22 (4 MiB) for levels 4..9. Larger blocks improve
+     * ratio (matches are block-local) at the cost of memory: compression uses
+     * ~10x block size (~14x at chain levels, see level), decompression ~2x. */
     unsigned block_log;
     /* worker threads: 0 or 1 compresses on the calling thread; N >= 2
      * runs a pipeline of N compression workers plus a writer thread,

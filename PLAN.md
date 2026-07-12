@@ -112,8 +112,25 @@ ratio ladder monotonically past L7 where structure recurs — L9 vs L7: xml
 lcet10 0.3090→0.3026, alice 0.3445→0.3431 — while incompressible/tiny files hold
 at the L7 floor (kennedy.xls, grammar.lsp, xargs.1 flat). The cost is speed: L8
 ~3–4 MiB/s, L9 ~1–2 MiB/s (optimal-parse territory, à la zstd btopt/btultra).
-Bench level sweep gained L8. Next Phase 5 levers: faster decode, larger windows,
-and repeat-offset-aware / multi-pass pricing to widen the optimal-parse win.
+Bench level sweep gained L8.
+Then larger windows arrived as a level-dependent default block size (wire-neutral;
+the block *is* the match window, matches stay block-local per FORMAT.md). Matches
+were always block-local and the distance buckets already reach 2^24, but the
+default `block_log` was a flat 20 (1 MiB) regardless of level, so high levels
+searched a needlessly small window. The default now scales with level in
+`frame.c` (`BLOCK_LOG_DEFAULT`/`BLOCK_LOG_DEFAULT_HIGH`, resolved before the MT
+branch so both paths agree): levels 1–3 keep 20 (1 MiB — the greedy/fast matchers
+don't exploit a wider window and it costs memory + speed), levels 4–9 default to
+22 (4 MiB). An explicit `-b`/`block_log` still overrides. Measurement drove the
+cutoff: 4 MiB captures most of the ratio while a 16 MiB (bl24) default would cost
+~5x compress speed (deep chains over a huge window) and turn medium files
+single-block, so bl24 stays opt-in. Decoder-agnostic (block_log is just a header
+byte in [12,24] every decoder already handles), MT frames bit-identical, full
+matrix green incl. TSan, all 131 tests pass. At the new L6 default vs the old
+bl20: enwik8 0.3368→0.3254, webster 0.2659→0.2557 (−3.8%), nci 0.0758→0.0709
+(−6.5%), mozilla −1.4%; the win widens at the optimal tier (L9 dickens
+0.3340→0.3157 at bl22). Next Phase 5 levers: faster decode, and repeat-offset-
+aware / multi-pass pricing to widen the optimal-parse win.
 
 Phases are ordered so that measurement exists before the codec does, and
 correctness is locked in before performance work starts. Each phase ends green:

@@ -24,7 +24,9 @@ static const uint8_t END_MAGIC[4] = {'p', 'E', 'n', 'd'};
 #define FRAME_VERSION_MAX 1
 #define BLOCK_LOG_MIN 12
 #define BLOCK_LOG_MAX 24
-#define BLOCK_LOG_DEFAULT 20
+#define BLOCK_LOG_DEFAULT 20      /* fast levels: 1 MiB window */
+#define BLOCK_LOG_DEFAULT_HIGH 22 /* levels >= HIGH_LEVEL: 4 MiB window */
+#define BLOCK_LOG_HIGH_LEVEL 4    /* first level to widen the default window */
 #define BLOCK_HDR_BYTES 17 /* type + raw_len + comp_len + raw_hash */
 #define INDEX_ENTRY_BYTES 16
 #define TRAILER_FIXED_BYTES 29 /* end marker + count + total + hash + footer */
