@@ -104,11 +104,17 @@ through them.
   addresses, which is safe (`__builtin_prefetch` never faults; ASan does not
   instrument it). Bit-identical (same matches found); marginal alone on the
   shallow fast-tier chains, additive with the depth retune below.
-- **Start the rescan from where it can win.** `longest_match` already guards
-  with `src[cand + best] == src[i + best]`, but on success it re-compares
-  from `l = 0`. Comparing backward from `best` (or checking
-  `src[cand+best-7..best]` as one 64-bit word first) rejects most candidates
-  with one load instead of `best` byte compares.
+- **[TRIED — REVERTED]** **Start the rescan from where it can win.**
+  `longest_match`/`find_matches` guard with `src[cand + best] == src[i + best]`
+  then re-compare from `l = 0`. Widening the guard to the 8-byte window ending
+  at `best` (one `read64==read64` when `best >= 7`, byte compare otherwise) is
+  bit-identical — a window mismatch implies the common prefix is `<= best`, so
+  no candidate is wrongly dropped. But it measured **worse**: `parc_lz_chain`
+  +12.6% instructions (668.8M → 753.4M, webster 12 MiB L3). `match_len` is
+  already a wide, inlined 8-byte-at-a-time compare, so the "rescan" it would
+  skip is cheap, while the wider guard adds two loads and a `best >= 7` branch
+  to *every* candidate — most of which the single-byte guard already rejects.
+  Not worth it for this matcher; left as-is.
 - **[DONE]** **Hash 5 bytes instead of 4 in the chain matcher.** `parc_lz_chain`
   (levels 2–7) now hashes 5 bytes (`hash5`/`read5`, one masked 64-bit load;
   greedy L1 keeps `hash4`), so each chain holds only positions sharing a 5-byte
@@ -132,6 +138,34 @@ through them.
   full token array (8 bytes/token) to memory, then immediately re-walk it to
   histogram / transcode. Counting frequencies while emitting tokens saves one
   full pass over a multi-megabyte array (cache traffic, not ALU).
+
+### Matcher throughput — the dominant compress cost (trades ratio)
+
+A callgrind profile of the default level (L3, `parc_lz_chain`, webster 12 MiB)
+puts **`parc_lz_chain` at ~68% of compress instructions**, with
+`parc_fse_encode` (~14%) and `encode_block` (~14%) next. Compress is also
+~4–5× slower than decompress end-to-end, so the matcher is *the* speed lever.
+Unlike the entropy/bitstream items above, the ratio-neutral matcher wins are
+now largely exhausted (the guard-widening experiment above measured worse), so
+further matcher speed **costs compression ratio** and must be justified per step
+on the full `speed_vs_ratio` corpus (`tools/plot_bench.py --run`). Two open
+directions, in increasing ratio budget:
+
+- **Small ratio budget (~1%): retune the fast-tier chain search.** Tighten
+  `max_chain`/`nice_len` for levels 2–5 (`parc_lz_cfg_for_level`, `lz.c`) and/or
+  add cheaper early-exits (e.g. break the chain walk once a `nice_len`-class
+  match is found, or cap total `match_len` work per position), keeping each
+  level's ratio regression under ~1% on the corpus. Conservative — preserves the
+  ladder's shape; this is a continuation of the 5-byte-hash + halved-depth retune
+  already on this branch. Measure the ladder stays monotonic.
+- **Larger budget: a genuinely fast tier for L1–L2.** Replace the hash-chain
+  walk at the fast end with an LZ4-style structure — a single-entry hash table
+  (or a small N-way bucket, N≈2–4) probed once per position, no chain pointer
+  chase — accepting a few % ratio loss for a large throughput jump at the fast
+  end. Bigger change (new matcher path + level wiring, `lz.c`/`block.c`), and it
+  reshapes where L1–L2 sit on the speed-vs-ratio curve; worth it only if a fast
+  tier well below zstd-3's ratio but at much higher speed is a goal for the
+  ladder.
 
 ## Entropy coders
 
@@ -165,18 +199,29 @@ through them.
   Encoding alternate symbols with independent states doubles decode
   throughput. **[format change]** — worth considering for a v2, it is why
   zstd uses interleaved streams.
-- **Encode into a local accumulator instead of the `grp` array.**
-  `parc_fse_encode` stores one `uint32_t` group per symbol and then re-reads
-  the whole array in reverse to emit it (`fse.c:273-288`) — two full memory
-  passes plus a `parc_bw_put` call per symbol. Alternative: emit backwards
-  into the end of a scratch buffer with a local 64-bit accumulator (bytes
-  come out already in decode order), then a single `memcpy`/bulk append into
-  the writer. One pass, no per-symbol calls.
-- **Use a multi-lane histogram in `emit_fse_stream`.** The single-table
-  `freq[syms[i]]++` loop (`block.c:271-273`) stalls on store-to-load
-  forwarding whenever nearby symbols repeat (very common in literals). Four
-  interleaved count tables summed at the end (the zstd `HIST_count` trick)
-  is ~3-4x faster on repetitive data.
+- **[DONE, PARTIAL]** **Emit the `grp` array through a register-held
+  accumulator.** `parc_fse_encode`'s second pass called `parc_bw_put` per
+  group; since `w` is a pointer the compiler cannot prove `w->dst` and `grp`
+  don't alias, so `acc`/`nbits`/`pos` round-tripped to memory every symbol.
+  That loop now copies the writer state into locals held in registers across
+  the whole emit and inlines `parc_bw_put`'s body (same 8-byte fast-path store,
+  same per-byte tail, same sticky-`failed` contract — bit-identical wire
+  output; the discarded-on-overflow bitstream makes the post-failure state
+  divergence unobservable). This is the encode-side mirror of the
+  `parc_fse_decode` local-reader. Measured: `parc_fse_encode` −16% instructions
+  (163.1M → 137.0M, webster 12 MiB L3), −2.6% program total; bit-identical
+  across all corpus files × levels 3/6/9 × formats 0/1, clean under ASan+UBSan,
+  132 tests pass. *Still open:* the first pass still writes `grp[]` then re-reads
+  it (two memory passes); collapsing to one pass would need a reverse-built
+  scratch buffer.
+- **[DONE]** **Use a multi-lane histogram in `emit_fse_stream`.** The single
+  `freq[syms[i]]++` loop stalled on store-to-load forwarding whenever nearby
+  symbols repeat (very common in literals). Now `hist_u8` (`block.c`)
+  accumulates into four independent 256-entry tables (processing 4 symbols per
+  iteration) and sums them at the end (the zstd `HIST_count` trick), breaking
+  the dependency so the increments pipeline. Bit-identical counts; the
+  histogram cost roughly halved (~18.7M → 10.4M instructions on webster L3,
+  −0.85% program total on top of the emit change), same tests/sanitizers clean.
 - **Cheapen `parc_fse_normalize`'s leftover loop.** Distributing the rounding
   leftover is an O(alphabet) scan *per unit* of leftover (`fse.c:73-87`);
   worst case that is O(alphabet × table_size). Fine today, but a

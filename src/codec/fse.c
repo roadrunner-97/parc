@@ -282,9 +282,58 @@ parc_err parc_fse_encode(parc_bw *w, const parc_fenc *e, const uint8_t *syms,
 
     /* Emit groups in reverse (decode) order: final state first, then the
      * transitions in forward order, so a forward reader recovers symbols in
-     * order. */
-    for (size_t j = ng; j-- > 0;)
-        parc_bw_put(w, grp[j] & 0xFFFFu, grp[j] >> 16);
+     * order. Drain into locals held in registers across the whole loop rather
+     * than a parc_bw_put call per group: w is a pointer, so each call reloads
+     * w->acc/nbits/pos from memory (the compiler cannot prove w->dst and grp
+     * don't alias) — the writer state round-trips to memory every symbol.
+     * Mirrors the local-reader in parc_fse_decode. The body replicates
+     * parc_bw_put exactly (same 8-byte fast-path store, same per-byte tail,
+     * same sticky-failed contract), so the wire output is bit-identical; when
+     * capacity is exceeded the block is stored raw and this bitstream is
+     * discarded, so letting acc/nbits keep advancing past the first overflow
+     * (instead of freezing as parc_bw_put would) is not observable. */
+    if (!w->failed) {
+        uint8_t *dst = w->dst;
+        size_t cap = w->cap;
+        size_t pos = w->pos;
+        uint64_t acc = w->acc;
+        unsigned nbits = w->nbits;
+        int failed = 0;
+        for (size_t j = ng; j-- > 0;) {
+            unsigned n = grp[j] >> 16;
+            if (n == 0)
+                continue;
+            acc |= (uint64_t)(grp[j] & 0xFFFFu) << nbits;
+            nbits += n;
+            if (nbits < 8)
+                continue;
+            if (pos + 8 <= cap) {
+                unsigned whole = nbits >> 3;
+                unsigned shift = whole * 8u;
+                parc_bs_write_le64(dst + pos, acc);
+                pos += whole;
+                acc = shift >= 64 ? 0 : (acc >> shift);
+                nbits -= shift;
+            } else {
+                while (nbits >= 8) {
+                    uint8_t byte = (uint8_t)(acc & 0xFFu);
+                    if (pos < cap) {
+                        dst[pos] = byte;
+                        pos++;
+                    } else {
+                        failed = 1;
+                    }
+                    acc >>= 8;
+                    nbits -= 8;
+                }
+            }
+        }
+        w->pos = pos;
+        w->acc = acc;
+        w->nbits = nbits;
+        if (failed)
+            w->failed = 1;
+    }
 
     return w->failed ? PARC_ERR_LIMIT : PARC_OK;
 }

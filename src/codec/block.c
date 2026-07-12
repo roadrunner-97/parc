@@ -308,14 +308,34 @@ static parc_err blk_decompress_v0(const uint8_t *comp, uint32_t comp_len,
 
 /* ---- v1: FSE over a sequence model with repeat offsets (FORMAT.md §3) ---- */
 
+/* Four-lane byte histogram. A single freq[syms[i]]++ table stalls on
+ * store-to-load forwarding whenever nearby symbols repeat (very common in
+ * literals); four independent tables summed at the end break that dependency
+ * so the increments pipeline (the zstd HIST_count trick). Writes all 256
+ * entries; symbols never reach an alphabet's unused high slots, which stay 0. */
+static void hist_u8(uint32_t freq[256], const uint8_t *syms, size_t count)
+{
+    uint32_t c0[256] = {0}, c1[256] = {0}, c2[256] = {0}, c3[256] = {0};
+    size_t i = 0;
+    for (; i + 4 <= count; i += 4) {
+        c0[syms[i]]++;
+        c1[syms[i + 1]]++;
+        c2[syms[i + 2]]++;
+        c3[syms[i + 3]]++;
+    }
+    for (; i < count; ++i)
+        c0[syms[i]]++;
+    for (unsigned s = 0; s < 256; ++s)
+        freq[s] = c0[s] + c1[s] + c2[s] + c3[s];
+}
+
 /* Histogram, normalize, build the encode table, then write the table and the
  * FSE-coded symbols. count >= 1. */
 static void emit_fse_stream(parc_bw *w, const uint8_t *syms, size_t count,
                             unsigned alpha, parc_fenc *fe, uint32_t *grp)
 {
-    uint32_t freq[LIT_SYMS] = {0};
-    for (size_t i = 0; i < count; ++i)
-        freq[syms[i]]++;
+    uint32_t freq[LIT_SYMS];
+    hist_u8(freq, syms, count);
     unsigned ms = 0;
     for (unsigned s = 0; s < alpha; ++s)
         if (freq[s])
