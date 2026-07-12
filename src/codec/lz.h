@@ -75,14 +75,19 @@ size_t parc_lz_chain(const uint8_t *src, size_t n, parc_tok *toks,
 
 /* Cost-based optimal parse. head/prev are the same hash-chain arrays as
  * parc_lz_chain (head needs no init; prev holds n entries). price, bt_len and
- * bt_dist are DP scratch, each holding PARC_OPT_CHUNK + 1 entries and needing
- * no initialization. cfg.max_chain must be >= 1; cfg.optimal is ignored here
- * (the caller has already dispatched). Same token contract and determinism as
- * the other matchers: block-local, decoder-valid tokens that rebuild the
- * input, chosen to minimize an estimated bit cost. Returns the token count. */
+ * bt_dist are DP scratch, each holding PARC_OPT_CHUNK + 1 entries; rep is DP
+ * scratch holding 3 * (PARC_OPT_CHUNK + 1) entries (the recent-offset cache
+ * carried along each path). None need initialization. cfg.max_chain must be
+ * >= 1; cfg.optimal is ignored here (the caller has already dispatched). The
+ * parse is repeat-offset-aware: it models the v1 3-entry recent-offset cache so
+ * matches reusing a recent distance are priced cheap (no offset extra bits),
+ * matching the sequence coder. Same token contract and determinism as the other
+ * matchers: block-local, decoder-valid tokens that rebuild the input, chosen to
+ * minimize an estimated bit cost. Returns the token count. */
 size_t parc_lz_optimal(const uint8_t *src, size_t n, parc_tok *toks,
                        uint32_t *head, uint32_t *prev, parc_lz_cfg cfg,
-                       uint64_t *price, uint32_t *bt_len, uint32_t *bt_dist);
+                       uint64_t *price, uint32_t *bt_len, uint32_t *bt_dist,
+                       uint32_t *rep);
 
 #ifdef __cplusplus
 }

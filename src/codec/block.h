@@ -41,6 +41,7 @@ typedef struct parc_blk_cctx {
     uint64_t *opt_price;
     uint32_t *opt_len;
     uint32_t *opt_dist;
+    uint32_t *opt_rep; /* recent-offset cache per DP node, 3*(CHUNK+1) entries */
     uint8_t *alt;
     /* v1 only (NULL at version 0) */
     uint8_t *lit;    /* literal bytes, max_block */

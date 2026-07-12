@@ -129,8 +129,31 @@ byte in [12,24] every decoder already handles), MT frames bit-identical, full
 matrix green incl. TSan, all 131 tests pass. At the new L6 default vs the old
 bl20: enwik8 0.3368→0.3254, webster 0.2659→0.2557 (−3.8%), nci 0.0758→0.0709
 (−6.5%), mozilla −1.4%; the win widens at the optimal tier (L9 dickens
-0.3340→0.3157 at bl22). Next Phase 5 levers: faster decode, and repeat-offset-
-aware / multi-pass pricing to widen the optimal-parse win.
+0.3340→0.3157 at bl22).
+Then the optimal parse (levels 8–9) became **repeat-offset-aware** (wire-neutral,
+no format change). Its DP had priced every match as a brand-new offset, blind to
+the v1 sequence coder's recent-offset cache — so it never deliberately reused an
+offset even though a repeat codes as offset symbol 0/1/2 with *zero* extra bits.
+`parc_lz_optimal` (`src/codec/lz.c`) now carries the 3-entry recent-offset cache
+along each DP path (`opt_rep` scratch, 3×(chunk+1), threaded through
+`parc_blk_cctx`; the cache at the chunk's final node carries into the next chunk,
+mirroring the encoder's continuous MTF), probes the three current recent offsets
+directly as extra candidates the hash-chain frontier can't see, and prices any
+match whose distance is a current repeat at the cheap rep cost (`match_cost` /
+`offset_cost` / `rep_update` model the exact §3 MTF; new-offset pricing is
+byte-identical to before, so data without repeats is unchanged). Rep symbols are
+priced near a new-offset symbol ({4,4,5} vs 5 bits) so reps win via their real
+edge — saving the offset *extra bits* on far/recurring distances — rather than
+grabbing coincidental near-offset repeats on prose. Safe by construction: block.c
+still keeps the smaller of the optimal parse and the level-7 lazy parse (a new
+`test_block` assertion pins L8/L9 ≤ L7). Correctness rides the rig (chunk-boundary
+rebuild exercises the cross-chunk carry) plus the full sanitizer matrix and an 80s
+roundtrip-fuzz smoke (108k execs) clean. On the corpus the win concentrates where
+offsets recur: L8 nci 0.0661→0.0613 (−7.3%), xml 0.0968→0.0952 (−1.7%), samba
+0.2078→0.2056 (−1.1%); pure prose (alice, lcet10, dickens) holds flat (≤0.06%).
+Next Phase 5 levers: faster decode, and multi-pass / measured-cost pricing
+(re-price against the first parse's actual FSE distributions) to self-calibrate
+the model and widen the optimal-parse win further.
 
 Phases are ordered so that measurement exists before the codec does, and
 correctness is locked in before performance work starts. Each phase ends green:

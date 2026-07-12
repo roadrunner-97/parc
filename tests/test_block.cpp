@@ -148,6 +148,12 @@ TEST(Block, HigherLevelsNeverBeatWorseThanGreedy) {
     uint32_t greedy = packed_len(1);
     EXPECT_LE(packed_len(6), greedy);
     EXPECT_LE(packed_len(9), greedy);
+    // The optimal tier (8, 9) encodes both a level-7 lazy parse and the
+    // repeat-offset-aware optimal parse and keeps the smaller, so it must never
+    // exceed the level-7 payload regardless of how the optimal parse is tuned.
+    uint32_t lazy7 = packed_len(7);
+    EXPECT_LE(packed_len(8), lazy7);
+    EXPECT_LE(packed_len(9), lazy7);
 }
 
 TEST(Block, MaxDistanceAndLongMatch) {

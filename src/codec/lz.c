@@ -236,18 +236,71 @@ static unsigned blen(uint32_t v)
     return v == 0 ? 0 : 32u - (unsigned)__builtin_clz(v);
 }
 
-/* Estimated cost, in bits*OPT_FIX, of coding one match as a v1 sequence:
- * a litLen symbol, a matchLen symbol + its bucket extra bits, and an offset
- * symbol + its bucket extra bits. Symbol costs are fixed estimates (litLen ~3,
- * matchLen ~4, offset ~5 bits); the extra-bit counts are exact. This is a
- * generic LZ price — longer matches and shorter distances come out cheaper —
- * so it also guides the v0 Huffman parse sensibly. */
-static uint64_t match_cost(uint32_t len, uint32_t dist)
+/* Sequence-symbol cost estimates in bits*OPT_FIX. A match always pays a litLen
+ * symbol and a matchLen symbol (+ its exact bucket extra bits). The offset part
+ * depends on whether the distance reuses one of the 3 recent offsets: a repeat
+ * hit costs a small symbol and *no* extra bits (offset code 0/1/2 in §3), while
+ * a new offset costs a larger symbol plus its bucket extra bits — which for a
+ * far match is the dominant term. Modelling the repeat cache is what lets the
+ * parse deliberately reuse offsets, exactly what the sequence coder rewards. */
+#define C_LITLEN (3u * OPT_FIX)
+#define C_MATCHLEN (4u * OPT_FIX)
+#define C_OFFNEW (5u * OPT_FIX)
+static const uint32_t C_OFFREP[3] = {4u * OPT_FIX, 4u * OPT_FIX, 5u * OPT_FIX};
+
+/* Offset-part cost (bits*OPT_FIX) for a match of distance dist given the recent
+ * offsets r[3]. *ri receives the repeat index hit (0..2), or -1 for a new
+ * offset. Mirrors the encoder's rep test in block.c: r[0] wins ties. */
+static uint64_t offset_cost(uint32_t dist, const uint32_t r[3], int *ri)
+{
+    if (dist == r[0]) {
+        *ri = 0;
+        return C_OFFREP[0];
+    }
+    if (dist == r[1]) {
+        *ri = 1;
+        return C_OFFREP[1];
+    }
+    if (dist == r[2]) {
+        *ri = 2;
+        return C_OFFREP[2];
+    }
+    *ri = -1;
+    unsigned ofb = blen(dist - 1);
+    return C_OFFNEW + (uint64_t)(ofb ? ofb - 1u : 0u) * OPT_FIX;
+}
+
+/* Full estimated cost of one match sequence (bits*OPT_FIX), rep-aware. */
+static uint64_t match_cost(uint32_t len, uint32_t dist, const uint32_t r[3],
+                           int *ri)
 {
     unsigned mlb = blen(len - PARC_LZ_MIN_MATCH);
-    unsigned ofb = blen(dist - 1);
-    unsigned extra = (mlb ? mlb - 1u : 0u) + (ofb ? ofb - 1u : 0u);
-    return (uint64_t)(12u + extra) * OPT_FIX;
+    uint64_t ml = C_MATCHLEN + (uint64_t)(mlb ? mlb - 1u : 0u) * OPT_FIX;
+    return C_LITLEN + ml + offset_cost(dist, r, ri);
+}
+
+/* Apply the recent-offset MTF update for a match of distance dist that hit
+ * repeat index ri (-1 for a new offset): write the post-match cache to out. */
+static void rep_update(const uint32_t r[3], uint32_t dist, int ri,
+                       uint32_t out[3])
+{
+    if (ri == 0) {
+        out[0] = r[0];
+        out[1] = r[1];
+        out[2] = r[2];
+    } else if (ri == 1) {
+        out[0] = r[1];
+        out[1] = r[0];
+        out[2] = r[2];
+    } else if (ri == 2) {
+        out[0] = r[2];
+        out[1] = r[0];
+        out[2] = r[1];
+    } else {
+        out[0] = dist;
+        out[1] = r[0];
+        out[2] = r[1];
+    }
 }
 
 /* Per-byte literal cost from the block's order-0 histogram (bits*OPT_FIX):
@@ -315,13 +368,19 @@ static uint32_t find_matches(const uint8_t *src, size_t n, size_t i,
 
 size_t parc_lz_optimal(const uint8_t *src, size_t n, parc_tok *toks,
                        uint32_t *head, uint32_t *prev, parc_lz_cfg cfg,
-                       uint64_t *price, uint32_t *bt_len, uint32_t *bt_dist)
+                       uint64_t *price, uint32_t *bt_len, uint32_t *bt_dist,
+                       uint32_t *rep)
 {
     assert(n <= PARC_LZ_MAX_BLOCK && cfg.max_chain >= 1);
     memset(head, 0xFF, HASH_SIZE * sizeof *head); /* all NO_POS */
 
     uint32_t litp[256];
     build_lit_prices(src, n, litp);
+
+    /* recent-offset cache carried across chunks, mirroring the v1 encoder's
+     * {1,2,3} init and MTF update (block.c). Within a chunk the cache along the
+     * best path to each node lives in rep[3*k..3*k+2]. */
+    uint32_t carry_rep[3] = {1, 2, 3};
 
     size_t nt = 0;
     size_t c = 0;
@@ -334,6 +393,9 @@ size_t parc_lz_optimal(const uint8_t *src, size_t n, parc_tok *toks,
         for (size_t k = 0; k <= clen; ++k)
             price[k] = UINT64_MAX;
         price[0] = 0;
+        rep[0] = carry_rep[0];
+        rep[1] = carry_rep[1];
+        rep[2] = carry_rep[2];
 
         /* When a position yields a match at least nice_len long, the optimal
          * path almost certainly takes it, so the interior positions are still
@@ -345,16 +407,42 @@ size_t parc_lz_optimal(const uint8_t *src, size_t n, parc_tok *toks,
         for (size_t ii = 0; ii < clen; ++ii) {
             size_t pos = c + ii;
             uint64_t pc = price[ii];
+            const uint32_t *r = &rep[3 * ii];
 
             uint64_t lp = pc + litp[src[pos]];
             if (lp < price[ii + 1]) {
                 price[ii + 1] = lp;
                 bt_len[ii + 1] = src[pos];
                 bt_dist[ii + 1] = 0;
+                rep[3 * ii + 3] = r[0]; /* literal: cache unchanged */
+                rep[3 * ii + 4] = r[1];
+                rep[3 * ii + 5] = r[2];
             }
 
             if (pos + PARC_LZ_MIN_MATCH > n)
                 continue;
+
+            /* Probe the three recent offsets directly: a repeat match is priced
+             * cheap (no offset extra bits), so even a short one can beat a
+             * longer new-offset match or set up a cheaper continuation. These
+             * candidates are invisible to the hash-chain frontier below. */
+            size_t rmax = (clen - ii < n - pos ? clen - ii : n - pos);
+            for (int j = 0; j < 3; ++j) {
+                uint32_t rd = r[j];
+                if (rd == 0 || rd > pos)
+                    continue;
+                size_t rl = match_len(src, pos - rd, pos, rmax);
+                if (rl < PARC_LZ_MIN_MATCH)
+                    continue;
+                int ri;
+                uint64_t rp = pc + match_cost((uint32_t)rl, rd, r, &ri);
+                if (rp < price[ii + rl]) {
+                    price[ii + rl] = rp;
+                    bt_len[ii + rl] = (uint32_t)rl;
+                    bt_dist[ii + rl] = rd;
+                    rep_update(r, rd, ri, &rep[3 * (ii + rl)]);
+                }
+            }
 
             uint32_t h = hash4(read32(src + pos));
             uint32_t cand = head[h];
@@ -382,11 +470,13 @@ size_t parc_lz_optimal(const uint8_t *src, size_t n, parc_tok *toks,
             uint32_t di = 0;
             while (di + 1 < cnt && out[di].len < bl)
                 ++di;
-            uint64_t mp = pc + match_cost(bl, out[di].dist);
+            int ri;
+            uint64_t mp = pc + match_cost(bl, out[di].dist, r, &ri);
             if (mp < price[ii + bl]) {
                 price[ii + bl] = mp;
                 bt_len[ii + bl] = bl;
                 bt_dist[ii + bl] = out[di].dist;
+                rep_update(r, out[di].dist, ri, &rep[3 * (ii + bl)]);
             }
 
             /* price a bounded window of short lengths, each at the smallest
@@ -399,11 +489,12 @@ size_t parc_lz_optimal(const uint8_t *src, size_t n, parc_tok *toks,
                     ++fk;
                 if (fk >= cnt)
                     break;
-                uint64_t p = pc + match_cost(ell, out[fk].dist);
+                uint64_t p = pc + match_cost(ell, out[fk].dist, r, &ri);
                 if (p < price[ii + ell]) {
                     price[ii + ell] = p;
                     bt_len[ii + ell] = ell;
                     bt_dist[ii + ell] = out[fk].dist;
+                    rep_update(r, out[fk].dist, ri, &rep[3 * (ii + ell)]);
                 }
             }
         }
@@ -423,6 +514,12 @@ size_t parc_lz_optimal(const uint8_t *src, size_t n, parc_tok *toks,
             toks[a] = toks[b - 1];
             toks[b - 1] = t;
         }
+
+        /* rep[3*clen..] is the cache along the chosen (backtracked) path's final
+         * node, so it is the recent-offset state to resume from next chunk. */
+        carry_rep[0] = rep[3 * clen];
+        carry_rep[1] = rep[3 * clen + 1];
+        carry_rep[2] = rep[3 * clen + 2];
 
         c += clen;
     }

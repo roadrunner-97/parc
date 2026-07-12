@@ -87,10 +87,11 @@ LzResult lz_optimal(const std::vector<uint8_t> &in, unsigned level) {
     std::vector<uint32_t> prev(in.size() ? in.size() : 1);
     std::vector<uint64_t> price(PARC_OPT_CHUNK + 1);
     std::vector<uint32_t> btl(PARC_OPT_CHUNK + 1), btd(PARC_OPT_CHUNK + 1);
+    std::vector<uint32_t> rep(3 * (PARC_OPT_CHUNK + 1));
     parc_lz_cfg cfg = parc_lz_cfg_for_level(level);
     size_t nt = parc_lz_optimal(in.data(), in.size(), r.toks.data(),
                                 head.data(), prev.data(), cfg, price.data(),
-                                btl.data(), btd.data());
+                                btl.data(), btd.data(), rep.data());
     EXPECT_LE(nt, in.size());
     r.toks.resize(nt);
     check_rebuild(r, in);

@@ -97,8 +97,10 @@ parc_err parc_blk_cctx_init(parc_blk_cctx *cx, size_t max_block, unsigned level,
         cx->opt_price = malloc(nchunk * sizeof *cx->opt_price);
         cx->opt_len = malloc(nchunk * sizeof *cx->opt_len);
         cx->opt_dist = malloc(nchunk * sizeof *cx->opt_dist);
+        cx->opt_rep = malloc(3 * nchunk * sizeof *cx->opt_rep);
         cx->alt = malloc(max_block);
-        ok = ok && cx->opt_price && cx->opt_len && cx->opt_dist && cx->alt;
+        ok = ok && cx->opt_price && cx->opt_len && cx->opt_dist &&
+             cx->opt_rep && cx->alt;
     }
 
     if (version == 1) {
@@ -130,6 +132,7 @@ void parc_blk_cctx_free(parc_blk_cctx *cx)
     free(cx->opt_price);
     free(cx->opt_len);
     free(cx->opt_dist);
+    free(cx->opt_rep);
     free(cx->alt);
     free(cx->lit);
     free(cx->ll_sym);
@@ -553,7 +556,7 @@ int parc_blk_compress(parc_blk_cctx *cx, const uint8_t *src, uint32_t raw_len,
 
     size_t nt_opt = parc_lz_optimal(src, raw_len, cx->toks, cx->htab, cx->prev,
                                     cx->cfg, cx->opt_price, cx->opt_len,
-                                    cx->opt_dist);
+                                    cx->opt_dist, cx->opt_rep);
     uint32_t opt_cap = r_lazy == PARC_BLK_PACKED ? cl_lazy - 1 : raw_len - 1;
     uint32_t cl_opt = 0;
     int r_opt = encode_block(cx, src, raw_len, cx->toks, nt_opt, cx->alt,
