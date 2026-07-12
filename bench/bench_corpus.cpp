@@ -24,6 +24,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -278,6 +279,25 @@ std::vector<Codec> make_codecs() {
         codecs.push_back({"parc-1-t" + std::to_string(t),
                           std::bind(parc1_compress_t, t, _1, _2),
                           std::bind(parc0_decompress_t, t, _1, _2, _3, _4),
+                          true});
+    }
+    // nproc-threaded level ladder: parc as it is actually run. The frame is
+    // bit-identical to the single-thread ladder, so ratio matches exactly and
+    // only speed differs; this is the series plotted against the baselines by
+    // tools/plot_bench.py. Wall-clock timed like the other MT entries. L == 0
+    // is the default level.
+    unsigned hw = std::thread::hardware_concurrency();
+    if (hw < 1) hw = 1;
+    for (unsigned L : {0u, 1u, 6u, 8u, 9u}) {
+        using namespace std::placeholders;
+        std::string suf = L ? "-L" + std::to_string(L) : "";
+        codecs.push_back({"parc-0-mt" + suf,
+                          std::bind(parc_compress_g, PARC_FORMAT_V0, L, hw, _1, _2),
+                          std::bind(parc0_decompress_t, hw, _1, _2, _3, _4),
+                          true});
+        codecs.push_back({"parc-1-mt" + suf,
+                          std::bind(parc_compress_g, PARC_FORMAT_V1, L, hw, _1, _2),
+                          std::bind(parc0_decompress_t, hw, _1, _2, _3, _4),
                           true});
     }
     return codecs;
