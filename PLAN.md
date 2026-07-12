@@ -151,9 +151,27 @@ rebuild exercises the cross-chunk carry) plus the full sanitizer matrix and an 8
 roundtrip-fuzz smoke (108k execs) clean. On the corpus the win concentrates where
 offsets recur: L8 nci 0.0661→0.0613 (−7.3%), xml 0.0968→0.0952 (−1.7%), samba
 0.2078→0.2056 (−1.1%); pure prose (alice, lcet10, dickens) holds flat (≤0.06%).
-Next Phase 5 levers: faster decode, and multi-pass / measured-cost pricing
-(re-price against the first parse's actual FSE distributions) to self-calibrate
-the model and widen the optimal-parse win further.
+Then the fast-tier matcher (levels 2–7, the common `parc_lz_chain` lazy path) got
+faster (wire-neutral in the format sense — decode is untouched — but it changes
+which matches are found, so compressed bytes differ). Three coupled changes in
+`src/codec/lz.c`: the chain hash widened from 4 to 5 bytes (`hash5`/`read5`, a
+single masked 64-bit load; greedy L1 keeps `hash4`), so each chain carries only
+positions sharing a 5-byte prefix — truer candidates that reach real matches with
+less walking; `longest_match` prefetches the next chain link and its bytes to
+overlap the cache-missing `prev[]` pointer chase; and, cashing in the ~2% ratio
+cushion `hash5` buys, the level 2–5 chain depths were halved ({8,16,32,64}→
+{4,8,16,32}). Net on the corpus, single-threaded: webster (prose) L3/L4/L5
+compress **1.33×/1.82×/2.43×** faster at flat ratio (±0.2%), alice 1.2–1.4×
+flat; structured/binary trades ~1–2% ratio for the speed (nci 1.2–1.7×, mozilla
+1.35–2.1×). The ratio ladder stays monotonic L1→L9; full matrix green incl. TSan,
+112k-exec roundtrip-fuzz smoke clean. This work also corrected the plan's stale
+decode premise: table-based Huffman + batched FSE + wide match-copy + inlined
+bitstream already landed, so decode now runs 430–1600 MB/s (enwik8 v1 446, nci
+1587) and v0 Huffman actually decodes *faster* than v1 FSE — decode is no longer
+the gap. Bench fast-tier level entries shift accordingly.
+Next Phase 5 levers: multi-pass / measured-cost pricing (re-price against the
+first parse's actual FSE distributions) to self-calibrate the optimal model, and
+the remaining matcher/entropy micro-optimizations tracked in `OPTIMIZATIONS.md`.
 
 Phases are ordered so that measurement exists before the codec does, and
 correctness is locked in before performance work starts. Each phase ends green:
