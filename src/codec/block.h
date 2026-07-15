@@ -23,6 +23,14 @@ enum parc_btype {
     PARC_BLK_END = 0xFF, /* end marker; not a block type on the API below */
 };
 
+/* Tail slack (bytes) that every decode destination buffer and the literal
+ * source buffer must be over-allocated by. The reconstruct loop copies matches
+ * and literals in unconditional fixed-width chunks ("wildcopy"), which may
+ * write/read up to one chunk (< PARC_WILDCOPY_SLACK) past the logical end of a
+ * copy; the slack keeps that overrun inside the allocation. Callers that pass a
+ * `dst` to parc_blk_decompress MUST size it >= raw_len + PARC_WILDCOPY_SLACK. */
+#define PARC_WILDCOPY_SLACK 32
+
 /* Reusable compression scratch (hash table + token array, plus the chain
  * array for chain levels), sized for blocks up to max_block bytes and fixed
  * to one compression level and wire version. The v1 scratch (literal buffer,

@@ -106,12 +106,28 @@ Two complementary views:
     overlap at ≥8 distance is safe for 8-byte chunks).
   - `dist < 8`: use the offset-doubling trick — replicate the pattern until
     it is ≥8 bytes wide, then wide-copy.
-  - To use unconditional "wildcopy" (rounding the copy up to a multiple of
-    16 without per-chunk bounds checks), allocate the block output buffers
-    with ~32 bytes of slack (`raw`/`s->out` in `frame.c:226`, `mt.c:162-163`
-    and `dx` buffers) and only fall back to the careful loop within the last
-    few bytes of the block. No format impact; SSE2/NEON `memcpy` does the
-    SIMD for free.
+- **[DONE]** **Unconditional wildcopy for matches and literals.** `copy_match`
+  and the v1 per-sequence literal copy now go through `wild_copy()` (`block.c`),
+  which copies in unconditional 16-byte chunks (one `movups`) rounding the length
+  up, with no per-chunk length dispatch — the libc `memcpy` size-class branch was
+  the bulk of the cost since most LZ copies are short. `dist >= 16` matches
+  wildcopy directly (source/dest stay ≥16 apart, so each chunk is disjoint);
+  `dist < 16` keeps the correct period-doubling (a fixed 16-back source only
+  reproduces the period when `dist | 16`). Every decode destination and the
+  literal source now carry `PARC_WILDCOPY_SLACK` (32) trailing bytes so the
+  ≤15-byte overrun stays in-bounds: `raw` (`frame.c`), `s->out` (`mt.c`),
+  `dx->lit` (`block.c`); internal callers of `parc_blk_decompress` (the block
+  tests) size `dst` accordingly. No format impact — bit-identical roundtrip on
+  enwik8, all 132 tests pass under release and ASan (incl.
+  `BlockDecode.SurvivesArbitraryGarbage`). Measured enwik8 L3 verify:
+  `reconstruct` 136.7 ms → 83.4 ms (732 → 1200 MB/s), total decode 243 → 190 ms
+  (1.28×); real `decompress` ~410 → ~550 MB/s. `entropy_decode` (the FSE literal
+  stream) is now the dominant decode stage (47%), pointing at interleaved FSE
+  states (v2) next. Original notes for reference:
+  - `dist >= 8` (or 16): copy in 8/16-byte chunks (`memcpy` per chunk;
+    overlap at ≥8 distance is safe for 8-byte chunks).
+  - `dist < 8`: use the offset-doubling trick — replicate the pattern until
+    it is ≥8 bytes wide, then wide-copy.
 
 ## LZ compress — matchers (`src/codec/lz.c`)
 

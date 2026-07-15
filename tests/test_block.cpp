@@ -59,10 +59,13 @@ int roundtrip(const std::vector<uint8_t> &in, unsigned level = PARC_LEVEL_DEFAUL
     EXPECT_EQ(type, PARC_BLK_PACKED);
     EXPECT_GE(clen, 1u);
     EXPECT_LT(clen, in.size());
-    std::vector<uint8_t> out(in.size(), 0xCC);
+    // Decode dst must carry PARC_WILDCOPY_SLACK trailing bytes (wildcopy
+    // overrun); compare only the logical raw_len prefix.
+    std::vector<uint8_t> out(in.size() + PARC_WILDCOPY_SLACK, 0xCC);
     EXPECT_EQ(blk_decode(comp.data(), clen, out.data(),
                          static_cast<uint32_t>(in.size()), version),
               PARC_OK);
+    out.resize(in.size());
     EXPECT_EQ(out, in);
     return type;
 }
@@ -195,7 +198,7 @@ TEST(Block, RepeatOffsetPatternRoundtrips) {
 TEST(BlockDecode, RejectsTruncatedPayload) {
     for (unsigned version : {0u, 1u}) {
         Packed p = make_packed(version);
-        std::vector<uint8_t> out(p.raw.size());
+        std::vector<uint8_t> out(p.raw.size() + PARC_WILDCOPY_SLACK);
         for (size_t cut : {size_t{0}, size_t{1}, size_t{100},
                            p.comp.size() - 1})
             EXPECT_EQ(blk_decode(p.comp.data(), static_cast<uint32_t>(cut),
@@ -209,7 +212,7 @@ TEST(BlockDecode, RejectsTruncatedPayload) {
 TEST(BlockDecode, RejectsNonMinimalCompLenAndPadding) {
     for (unsigned version : {0u, 1u}) {
         Packed p = make_packed(version);
-        std::vector<uint8_t> out(p.raw.size());
+        std::vector<uint8_t> out(p.raw.size() + PARC_WILDCOPY_SLACK);
         // extra byte appended: comp_len no longer minimal
         std::vector<uint8_t> longer = p.comp;
         longer.push_back(0);
@@ -224,7 +227,7 @@ TEST(BlockDecode, RejectsNonMinimalCompLenAndPadding) {
 TEST(BlockDecode, RejectsWrongRawLen) {
     for (unsigned version : {0u, 1u}) {
         Packed p = make_packed(version);
-        std::vector<uint8_t> out(p.raw.size() + 8);
+        std::vector<uint8_t> out(p.raw.size() + 8 + PARC_WILDCOPY_SLACK);
         for (long d : {-3L, -1L, 1L, 3L}) {
             uint32_t raw_len =
                 static_cast<uint32_t>(static_cast<long>(p.raw.size()) + d);
@@ -243,7 +246,7 @@ TEST(BlockDecode, SurvivesArbitraryGarbage) {
     // crash or overrun (ASan enforces). Both decoders.
     parc_rng rng;
     parc_rng_seed(&rng, 0xBAD);
-    std::vector<uint8_t> out(4096);
+    std::vector<uint8_t> out(4096 + PARC_WILDCOPY_SLACK);
     for (unsigned version : {0u, 1u})
         for (int iter = 0; iter < 2000; ++iter) {
             size_t clen = 1 + parc_rng_range(&rng, 700);

@@ -243,7 +243,7 @@ parc_err parc_decompress_stream(FILE *in, FILE *out, const parc_dopts *opts,
     PARC_PROF_RESET();
 
     uint8_t *cbuf = malloc(bs);
-    uint8_t *raw = malloc(bs);
+    uint8_t *raw = malloc(bs + PARC_WILDCOPY_SLACK); /* wildcopy tail slack */
     parc_blk_dctx dx = {0}; /* v1 scratch; allocated only for version 1 */
     parc_buf seen; /* index entries as read from the blocks, wire encoding */
     parc_buf_init(&seen);

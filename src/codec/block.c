@@ -45,31 +45,47 @@ static uint32_t bucket_val(parc_br *r, unsigned b)
     return (1u << (b - 1)) + (uint32_t)parc_br_get(r, b - 1);
 }
 
+/* Copy `len` bytes from `s` to `d` in unconditional 16-byte chunks ("wildcopy"),
+ * for NON-overlapping ranges only (d - s >= 16, or entirely disjoint). Writes
+ * and reads up to 15 bytes past the logical end of the copy; callers guarantee
+ * both buffers carry >= PARC_WILDCOPY_SLACK trailing bytes so the overrun stays
+ * in-bounds. Avoids libc memcpy's length dispatch, which dominates LZ decode
+ * where most copies are short (a few bytes). `len` may be 0 (still stores one
+ * chunk of garbage into slack, harmless). */
+static inline void wild_copy(uint8_t *d, const uint8_t *s, size_t len)
+{
+    uint8_t *end = d + len;
+    do {
+        memcpy(d, s, 16); /* single 16-byte vector move */
+        d += 16;
+        s += 16;
+    } while (d < end);
+}
+
 /* Copy an LZ match: dst[pos+k] = dst[pos+k-dist] for k in [0, len). Callers
- * must have validated dist <= pos and pos + len <= raw_len, so both the source
- * and destination ranges lie inside the block buffer.
+ * must have validated dist <= pos and pos + len <= raw_len, and `dst` carries
+ * PARC_WILDCOPY_SLACK trailing bytes (so the wildcopy overrun is in-bounds).
  *
- * Overlapping matches (dist < len) produce a run that repeats with period
- * dist, so a plain memcpy/memmove is wrong. Instead we seed one period, then
- * grow the written run by doubling it: as long as the already-written prefix
- * length is a multiple of dist, copying it forward reproduces the pattern
- * exactly, and each copy is a bulk memcpy of non-overlapping ranges. This
- * replaces the byte-at-a-time loop that dominates LZ decode. */
+ * dist >= 16: source and destination stay >= 16 apart as both advance, so each
+ * 16-byte chunk is disjoint and a straight wildcopy reproduces the run.
+ * dist < 16: overlapping period; grow the written run by doubling (bulk memcpy
+ * of disjoint prefixes). Copying from a fixed 16-byte-back source would only
+ * reproduce the period when dist divides 16, so the doubling is kept for the
+ * whole small-offset run. Small offsets are the minority of matches. */
 static void copy_match(uint8_t *dst, uint32_t pos, uint32_t dist, uint32_t len)
 {
     uint8_t *d = dst + pos;
     const uint8_t *s = d - dist;
-    if (dist >= len) {
-        /* No overlap: source range is entirely before d. */
-        memcpy(d, s, len);
+    if (dist >= 16) {
+        wild_copy(d, s, len);
         return;
     }
-    /* Seed one period (adjacent, non-overlapping: s + dist == d). */
+    /* Seed one period (adjacent, non-overlapping: s + dist == d), then double:
+     * `filled` is always a multiple of dist here, so d[0..chunk) is a valid
+     * prefix of the output and chunk <= filled keeps the ranges disjoint. */
     memcpy(d, s, dist);
     uint32_t filled = dist;
     while (filled < len) {
-        /* filled is always a multiple of dist here, so d[0..chunk) is a valid
-         * prefix of the output; chunk <= filled keeps the ranges disjoint. */
         uint32_t chunk = filled < len - filled ? filled : len - filled;
         memcpy(d + filled, d, chunk);
         filled += chunk;
@@ -154,7 +170,7 @@ parc_err parc_blk_dctx_init(parc_blk_dctx *dx, size_t max_block)
     memset(dx, 0, sizeof *dx);
     size_t nseq_max = max_block / PARC_LZ_MIN_MATCH + 1;
     dx->max_block = max_block;
-    dx->lit = malloc(max_block);
+    dx->lit = malloc(max_block + PARC_WILDCOPY_SLACK);
     dx->sym = malloc(nseq_max);
     dx->ll = malloc(nseq_max * sizeof *dx->ll);
     dx->ml = malloc(nseq_max * sizeof *dx->ml);
@@ -694,7 +710,7 @@ static parc_err blk_decompress_v1(parc_blk_dctx *dx, const uint8_t *comp,
         uint32_t ll = dx->ll[i];
         if (ll > nlit - li)
             return PARC_ERR_CORRUPT;
-        memcpy(dst + pos, dx->lit + li, ll);
+        wild_copy(dst + pos, dx->lit + li, ll); /* dst/lit carry slack */
         pos += ll;
         li += ll;
         uint32_t dist = dx->dist[i], m = dx->ml[i];

@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 
+#include "codec/block.h" /* PARC_WILDCOPY_SLACK */
 #include "parc/parc.h"
 
 /* Slot lifecycle, tracked with three sequence counters (written <=
@@ -159,7 +160,7 @@ parc_err parc_mt_run(const parc_mt_ops *ops, void *ctx, unsigned threads,
         goto done;
     for (unsigned i = 0; i < e.nslots; ++i) {
         e.slots[i].in = malloc(max_block);
-        e.slots[i].out = malloc(max_block);
+        e.slots[i].out = malloc(max_block + PARC_WILDCOPY_SLACK);
         if (!e.slots[i].in || !e.slots[i].out)
             goto done;
     }
