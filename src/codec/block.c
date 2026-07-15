@@ -348,6 +348,65 @@ static void emit_fse_stream(parc_bw *w, const uint8_t *syms, size_t count,
     parc_fse_encode(w, fe, syms, count, grp);
 }
 
+/* Emit the per-sequence extra-bits stream that trails an FSE symbol stream:
+ * for each sequence i, the low bits of ex[i] whose width is the symbol's bucket
+ * size — s - base - 1 bits when s > base, and none otherwise (repeat offsets and
+ * empty buckets). The transcode sets ex[i] to exactly 0 whenever that width is
+ * 0, and ex[i] < 2^width otherwise, so the payload is ORed in unconditionally:
+ * no per-sequence branch to mispredict (the old three loops each branched on
+ * `sym[i] >= 1`). The writer state is held in registers across the whole loop —
+ * w's acc/nbits/pos otherwise round-trip to memory every put, because the byte
+ * store may alias the local w — and the body replicates parc_bw_put's fast-path
+ * 8-byte store, per-byte tail, and sticky-failed contract, so the wire output is
+ * bit-identical. Mirrors parc_fse_encode's register-held emit; the same
+ * discarded-on-overflow reasoning makes the post-failure divergence unobservable.
+ * base is 0 for litLen/matchLen streams, NREP for the offset stream. */
+static void emit_extra_bits(parc_bw *w, const uint8_t *sym, const uint32_t *ex,
+                            uint32_t count, unsigned base)
+{
+    if (w->failed)
+        return;
+    uint8_t *dst = w->dst;
+    size_t cap = w->cap;
+    size_t pos = w->pos;
+    uint64_t acc = w->acc;
+    unsigned nbits = w->nbits;
+    int failed = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        unsigned s = sym[i];
+        unsigned nb = s > base ? s - base - 1u : 0u;
+        acc |= (uint64_t)ex[i] << nbits; /* ex[i] == 0 when nb == 0 */
+        nbits += nb;
+        if (nbits >= 8) {
+            if (pos + 8 <= cap) {
+                unsigned whole = nbits >> 3;
+                unsigned shift = whole * 8u;
+                parc_bs_write_le64(dst + pos, acc);
+                pos += whole;
+                acc = shift >= 64 ? 0 : (acc >> shift);
+                nbits -= shift;
+            } else {
+                while (nbits >= 8) {
+                    uint8_t byte = (uint8_t)(acc & 0xFFu);
+                    if (pos < cap) {
+                        dst[pos] = byte;
+                        pos++;
+                    } else {
+                        failed = 1;
+                    }
+                    acc >>= 8;
+                    nbits -= 8;
+                }
+            }
+        }
+    }
+    w->pos = pos;
+    w->acc = acc;
+    w->nbits = nbits;
+    if (failed)
+        w->failed = 1;
+}
+
 /* Read an FSE table and decode `count` symbols into out. Returns PARC_OK or
  * PARC_ERR_CORRUPT/TRUNCATED. */
 static parc_err read_fse_stream(parc_br *r, uint8_t *out, size_t count,
@@ -420,19 +479,11 @@ static int encode_v1(parc_blk_cctx *cx, const uint8_t *src, uint32_t raw_len,
     parc_fenc *fe = cx->fenc;
     if (nseq > 0) {
         emit_fse_stream(&w, cx->ll_sym, nseq, LL_SYMS, fe, cx->grp);
-        for (uint32_t i = 0; i < nseq; ++i)
-            if (cx->ll_sym[i] >= 1)
-                parc_bw_put(&w, cx->ll_ex[i], cx->ll_sym[i] - 1u);
+        emit_extra_bits(&w, cx->ll_sym, cx->ll_ex, nseq, 0);
         emit_fse_stream(&w, cx->ml_sym, nseq, ML_SYMS, fe, cx->grp);
-        for (uint32_t i = 0; i < nseq; ++i)
-            if (cx->ml_sym[i] >= 1)
-                parc_bw_put(&w, cx->ml_ex[i], cx->ml_sym[i] - 1u);
+        emit_extra_bits(&w, cx->ml_sym, cx->ml_ex, nseq, 0);
         emit_fse_stream(&w, cx->of_sym, nseq, OF_SYMS, fe, cx->grp);
-        for (uint32_t i = 0; i < nseq; ++i) {
-            unsigned s = cx->of_sym[i];
-            if (s >= NREP + 1) /* new offset with a non-empty bucket */
-                parc_bw_put(&w, cx->of_ex[i], s - NREP - 1u);
-        }
+        emit_extra_bits(&w, cx->of_sym, cx->of_ex, nseq, NREP);
     }
     /* literals always non-empty (position 0 is always a literal) */
     emit_fse_stream(&w, cx->lit, nlit, LIT_SYMS, fe, cx->grp);
