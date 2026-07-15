@@ -6,6 +6,37 @@ Roughly ordered by expected impact within each section; the bitstream and the
 match-copy loop are the two biggest levers because everything hot funnels
 through them.
 
+## Profiling — measure before you cut
+
+Two complementary views:
+
+- **Per-stage timers (in-tree).** Build the `prof` preset (`cmake --preset prof
+  && cmake --build build-prof`) — an optimized `RelWithDebInfo -O3 -g` build with
+  `-DPARC_PROF` (`src/util/prof.{h,c}`). The single-thread compress/decompress
+  path (`frame.c`, `block.c`) then prints a stage breakdown (ms / % / MB/s /
+  calls) to stderr at end of stream. Stages: `io_read`/`io_write`,
+  `lz_match`, `transcode` (v1 tokens→sequences), `entropy_encode`,
+  `entropy_decode`, `reconstruct` (extra-bits + offset resolve + match copy),
+  `block_hash`, `stream_hash`. Timing is at stage granularity (a handful of
+  `CLOCK_MONOTONIC` reads per block, never per symbol), so overhead is noise and
+  the numbers are undistorted; off by default and zero-cost (every macro expands
+  to `((void)0)`). **Single-thread only** — the counters are lock-free globals,
+  so run `parc -T 1`; the MT frame path is not instrumented and its report
+  prints nothing. Use it to see the I/O-vs-compute split that a sampling profiler
+  blurs, and to confirm which stage a change actually moved. Representative
+  numbers (webster/dickens-class text): compress L3 v1 is `lz_match` ~78% /
+  `entropy_encode` ~15% / `transcode` ~5%; v1 decode is `reconstruct` ~59%
+  (match copy) / `entropy_decode` ~34%. `entropy_decode` reports `-` for MB/s
+  (entered once per FSE stream, not once per raw byte); per-stage `bytes` is
+  billed at one representative entry per stage so the optimal matcher's second
+  pass does not double-count.
+- **Instruction/cache attribution (external).** `build-relprof`
+  (`RelWithDebInfo`, frame pointers kept) feeds `perf record`/`callgrind` for
+  per-symbol instruction counts and D1/LL miss rates — the numbers cited
+  throughout this doc (e.g. `parc_lz_chain` ~68% of compress Ir, the
+  parallel-vs-AoS `parc_fdec` cachegrind comparison). The stage timers say
+  *which stage*; callgrind says *which instruction and why*.
+
 ## Bitstream (`src/util/bitstream.c`) — the hottest shared path
 
 - **[DONE]** **Refill the reader 8 bytes at a time.** `parc_br_get` and
@@ -254,16 +285,41 @@ directions, in increasing ratio budget:
 
 ## v1 sequence decode (`src/codec/block.c`)
 
-- **Fuse extra-bits reads into the FSE symbol pass.** Decode currently makes
-  four separate passes with a `parc_br_get`-per-element loop for ll/ml/of
-  extras (`block.c:399-431`). The passes are format-mandated (streams are
-  laid out separately), but each loop should use the batched local-reader
-  pattern; `bucket_val`'s `b == 0` branch can go away by table-izing
-  `(base[b], nbits[b])`.
-- **Sink the recent-offset shuffle branch.** The 3-way compare chain on
-  encode (`block.c:330-333`) and the branchy rotate on decode
-  (`block.c:417-425`) can be branchless (conditional moves over a 3-element
-  array); minor but free.
+- **[done] Batched extra-bits reads.** The ll/ml/of extra-bits loops each ran
+  a full `parc_br_get` (avail multiply + sticky branch + refill) per sequence.
+  They now share `decode_bucket_extras`, a register-held local reader
+  (acc/nbits/pos in registers, one wide refill per several fields, truncation
+  tested once per refill) that is `always_inline`d so each call specializes on
+  its constant `sub`/`add` and the `b == 0` branch folds. The offset pass reads
+  new-offset extras and resolves the recent-offset cache (scalar r0/r1/r2 slots,
+  not an indexed rotate) in a single fused pass over `sym[]`/`dist[]`.
+  Bit-exact. Net −10.5% instructions on dickens decode; +4–12% wall-clock on
+  decode-bound text (alice29, plrabn12, webster, samba). The remaining
+  format-mandated separation (symbols, then extras, in distinct stream regions)
+  still forces one pass per stream. A further idea: table-ize `(base[b],
+  nbits[b])` so even the `b == 0` test disappears — untried.
+- **[remaining] Faster literal decode.** After the above, `read_fse_stream`
+  (dominated by the literal-stream FSE decode) is the largest addressable chunk
+  (~31%). Note the "two-symbol per lookup" trick does **not** transfer from
+  Huffman to FSE/tANS: each transition consumes a data-dependent number of bits
+  and the next state depends on the actual bits read, so a single state index
+  cannot precompute the second symbol. The only genuine FSE-decode speedup left
+  is **interleaving 2–4 states** (see the FSE section) — a **[format change]**
+  for a v2, since it reshapes the bitstream.
+- **[TRIED — REVERTED]** **Pack `parc_fdec` into an array-of-structs.** The
+  decode table is three parallel arrays (`new_state`/`symbol`/`nbits`) indexed
+  by state; the theory (zstd's `FSE_decode_t` layout) was that folding them into
+  one 4-byte-per-cell array cuts the hot decode step (`parc_fse_decode`) from
+  three loads to one and improves locality. Measured **worse**: +3.0%
+  instructions on reymont decode (143.7M → 148.0M total-Ir, the delta is all in
+  FSE decode since nothing else changed), and a 1–4% wall-clock regression on
+  webster/reymont/xml verify. Cachegrind explains it: **D1 miss rate and LL refs
+  were identical** before and after — the tables (`table_log <= 12` ⇒ ≤ 16 KB)
+  are already L1-resident, so packing removes no cache misses, and the AoS cell
+  only *adds* sub-word extraction (byte/`u16` reads out of the packed word) that
+  the three scaled-index loads avoided. The premise (three cache-missing
+  accesses per symbol) does not hold at this table size. Left as parallel
+  arrays.
 
 ## Checksumming (`src/util/xxh64.c`, frame layer)
 

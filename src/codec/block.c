@@ -7,6 +7,7 @@
 #include "codec/fse.h"
 #include "codec/huffman.h"
 #include "util/bitstream.h"
+#include "util/prof.h"
 
 /* v0 alphabets per docs/FORMAT.md §2.2 */
 #define MAIN_SYMS 282
@@ -188,6 +189,7 @@ static int encode_v0(parc_blk_cctx *cx, const uint8_t *src, uint32_t raw_len,
 {
     (void)cx;
     (void)src;
+    PARC_PROF_BEGIN(ee);
     uint32_t mfreq[MAIN_SYMS] = {0};
     uint32_t dfreq[DIST_SYMS] = {0};
     for (size_t t = 0; t < nt; ++t) {
@@ -238,9 +240,11 @@ static int encode_v0(parc_blk_cctx *cx, const uint8_t *src, uint32_t raw_len,
     size_t bytes = 0;
     if (parc_bw_finish(&w, &bytes) != PARC_OK) {
         *comp_len = raw_len;
+        PARC_PROF_END(ee, PARC_PROF_ENTROPY_ENCODE, raw_len);
         return PARC_BLK_STORED;
     }
     *comp_len = (uint32_t)bytes;
+    PARC_PROF_END(ee, PARC_PROF_ENTROPY_ENCODE, raw_len);
     return PARC_BLK_PACKED;
 }
 
@@ -249,6 +253,7 @@ static parc_err blk_decompress_v0(const uint8_t *comp, uint32_t comp_len,
 {
     parc_br r;
     parc_br_init(&r, comp, comp_len);
+    PARC_PROF_BEGIN(ed);
 
     uint8_t mlens[MAIN_SYMS], dlens[DIST_SYMS];
     for (unsigned s = 0; s < MAIN_SYMS; ++s)
@@ -293,6 +298,7 @@ static parc_err blk_decompress_v0(const uint8_t *comp, uint32_t comp_len,
         copy_match(dst, pos, dist, len);
         pos += len;
     }
+    PARC_PROF_END(ed, PARC_PROF_ENTROPY_DECODE, raw_len);
 
     if (pos != raw_len || r.failed)
         return PARC_ERR_CORRUPT;
@@ -407,11 +413,95 @@ static void emit_extra_bits(parc_bw *w, const uint8_t *sym, const uint32_t *ex,
         w->failed = 1;
 }
 
+/* Top up `nbits` >= (need) bits in acc from src[pos..len) with one wide load
+ * away from the tail, else byte-at-a-time (setting trunc on underrun). Mirrors
+ * parc_br_fill exactly; the caller holds acc/nbits/pos/trunc as locals so the
+ * register-held decode loops below never round-trip reader state to memory.
+ * (need) must be <= 57, so one load always suffices. */
+#define BE_REFILL(need)                                                        \
+    do {                                                                       \
+        if (nbits < (need)) {                                                  \
+            if (pos + 8 <= len) {                                              \
+                uint64_t word_ = parc_bs_read_le64(src + pos);                 \
+                unsigned take_ = (64u - nbits) >> 3;                           \
+                if (take_ < 8)                                                 \
+                    word_ &= (UINT64_C(1) << (take_ * 8)) - 1;                 \
+                acc |= word_ << nbits;                                         \
+                pos += take_;                                                  \
+                nbits += take_ * 8;                                            \
+            } else {                                                           \
+                while (nbits < (need) && pos < len) {                          \
+                    acc |= (uint64_t)src[pos] << nbits;                        \
+                    pos++;                                                     \
+                    nbits += 8;                                                \
+                }                                                              \
+                if (nbits < (need))                                            \
+                    trunc = 1;                                                 \
+            }                                                                  \
+        }                                                                      \
+    } while (0)
+
+/* Batched bucket-extra-bits decode. For each symbol sym[i], recover the value
+ * that bucket_val() would (out[i] = add + bucket_val(sym[i] - sub)) but with a
+ * register-held reader and one wide refill per several fields instead of a full
+ * parc_br_get (avail multiply + sticky branch + refill) per field. This mirrors
+ * parc_fse_decode's local-reader: acc/nbits/pos stay in registers across the
+ * loop, truncation is tested once per refill, and the written-back reader state
+ * (pos*8 - nbits tracks bits_consumed) is identical to what the per-get path
+ * would leave, so downstream streams and the trailer check are unaffected.
+ *
+ * Symbols with sym[i] < sub are repeat-offset codes: they carry no extra bits
+ * and get out[i] = 0 (the caller's recent-offset pass overwrites them). For the
+ * litLen/matchLen streams sub == 0 and every symbol is a real bucket; for the
+ * offset stream sub == NREP and add == 1 so out[i] is the new-offset distance.
+ * On underrun the reader is marked failed (the caller returns CORRUPT). */
+static inline __attribute__((always_inline)) void
+decode_bucket_extras(parc_br *r, const uint8_t *sym, uint32_t *out,
+                     uint32_t count, unsigned sub, uint32_t add)
+{
+    PARC_PROF_BEGIN(rc);
+    const uint8_t *src = r->src;
+    size_t len = r->len;
+    size_t pos = r->pos;
+    uint64_t acc = r->acc;
+    unsigned nbits = r->nbits;
+    int trunc = 0;
+
+    for (uint32_t i = 0; i < count; ++i) {
+        unsigned s = sym[i];
+        if (s < sub) { /* repeat-offset code: no extra bits */
+            out[i] = 0;
+            continue;
+        }
+        unsigned b = s - sub;
+        if (b == 0) {
+            out[i] = add; /* bucket 0 -> value 0 */
+            continue;
+        }
+        unsigned nb = b - 1; /* nb <= 23: fits one refill (< 57) */
+        BE_REFILL(nb);
+        if (trunc)
+            break;
+        uint32_t low = (uint32_t)(acc & ((UINT64_C(1) << nb) - 1));
+        acc >>= nb;
+        nbits -= nb;
+        out[i] = add + (1u << nb) + low; /* (1 << (b-1)) + extra */
+    }
+
+    r->pos = pos;
+    r->acc = acc;
+    r->nbits = nbits;
+    if (trunc)
+        r->failed = 1;
+    PARC_PROF_END(rc, PARC_PROF_RECONSTRUCT, 0);
+}
+
 /* Read an FSE table and decode `count` symbols into out. Returns PARC_OK or
  * PARC_ERR_CORRUPT/TRUNCATED. */
 static parc_err read_fse_stream(parc_br *r, uint8_t *out, size_t count,
                                 unsigned alpha, parc_fdec *fd)
 {
+    PARC_PROF_BEGIN(ed);
     int16_t norm[LIT_SYMS];
     unsigned ms = 0, tl = 0;
     parc_err err = parc_fse_read_table(r, norm, &ms, &tl, alpha - 1);
@@ -420,7 +510,9 @@ static parc_err read_fse_stream(parc_br *r, uint8_t *out, size_t count,
     err = parc_fdec_build(fd, norm, ms, tl);
     if (err != PARC_OK)
         return err;
-    return parc_fse_decode(r, fd, out, count);
+    err = parc_fse_decode(r, fd, out, count);
+    PARC_PROF_END(ed, PARC_PROF_ENTROPY_DECODE, 0);
+    return err;
 }
 
 static int encode_v1(parc_blk_cctx *cx, const uint8_t *src, uint32_t raw_len,
@@ -431,6 +523,7 @@ static int encode_v1(parc_blk_cctx *cx, const uint8_t *src, uint32_t raw_len,
 
     /* Transcode tokens into a literal run and a sequence list, tracking the
      * recent-offset cache for repeat-offset codes. */
+    PARC_PROF_BEGIN(tc);
     uint32_t recent[NREP] = {1, 2, 3};
     uint32_t nlit = 0, nseq = 0, pend = 0;
     for (size_t t = 0; t < nt; ++t) {
@@ -472,7 +565,9 @@ static int encode_v1(parc_blk_cctx *cx, const uint8_t *src, uint32_t raw_len,
         nseq++;
         pend = 0;
     }
+    PARC_PROF_END(tc, PARC_PROF_TRANSCODE, raw_len);
 
+    PARC_PROF_BEGIN(ee);
     parc_bw w;
     parc_bw_init(&w, dst, cap);
     parc_bw_put(&w, nseq, 32);
@@ -491,9 +586,11 @@ static int encode_v1(parc_blk_cctx *cx, const uint8_t *src, uint32_t raw_len,
     size_t bytes = 0;
     if (parc_bw_finish(&w, &bytes) != PARC_OK) {
         *comp_len = raw_len;
+        PARC_PROF_END(ee, PARC_PROF_ENTROPY_ENCODE, raw_len);
         return PARC_BLK_STORED;
     }
     *comp_len = (uint32_t)bytes;
+    PARC_PROF_END(ee, PARC_PROF_ENTROPY_ENCODE, raw_len);
     return PARC_BLK_PACKED;
 }
 
@@ -513,33 +610,73 @@ static parc_err blk_decompress_v1(parc_blk_dctx *dx, const uint8_t *comp,
     if (nseq > 0) {
         if (read_fse_stream(&r, dx->sym, nseq, LL_SYMS, fd) != PARC_OK)
             return PARC_ERR_CORRUPT;
-        for (uint32_t i = 0; i < nseq; ++i)
-            dx->ll[i] = bucket_val(&r, dx->sym[i]);
+        decode_bucket_extras(&r, dx->sym, dx->ll, nseq, 0, 0);
         if (read_fse_stream(&r, dx->sym, nseq, ML_SYMS, fd) != PARC_OK)
             return PARC_ERR_CORRUPT;
-        for (uint32_t i = 0; i < nseq; ++i) {
-            dx->ml[i] = bucket_val(&r, dx->sym[i]) + PARC_LZ_MIN_MATCH;
+        decode_bucket_extras(&r, dx->sym, dx->ml, nseq, 0, PARC_LZ_MIN_MATCH);
+        if (r.failed)
+            return PARC_ERR_CORRUPT;
+        for (uint32_t i = 0; i < nseq; ++i)
             total_match += dx->ml[i];
-        }
         if (total_match > raw_len)
             return PARC_ERR_CORRUPT;
         if (read_fse_stream(&r, dx->sym, nseq, OF_SYMS, fd) != PARC_OK)
             return PARC_ERR_CORRUPT;
-        uint32_t recent[NREP] = {1, 2, 3};
-        for (uint32_t i = 0; i < nseq; ++i) {
-            unsigned s = dx->sym[i];
-            uint32_t dist;
-            if (s < NREP) {
-                dist = recent[s];
-                for (unsigned k = s; k > 0; --k)
-                    recent[k] = recent[k - 1];
-            } else {
-                dist = bucket_val(&r, s - NREP) + 1;
-                recent[2] = recent[1];
-                recent[1] = recent[0];
+        /* Offset decode: read each new-offset's extra bits and resolve the
+         * recent-offset cache in one pass, with a register-held reader (the
+         * parc_fse_decode pattern) so the pass touches sym[]/dist[] once. The
+         * recent slots are scalar (r0 newest) so the repeat-code shuffle is a
+         * few moves, not an indexed inner loop. Repeat codes (s < NREP) carry
+         * no extra bits. Bit-exact with the per-get path: same whole bytes in
+         * the same order, and pos*8 - nbits tracks bits_consumed identically. */
+        {
+            PARC_PROF_BEGIN(rc);
+            const uint8_t *src = r.src;
+            size_t len = r.len, pos = r.pos;
+            uint64_t acc = r.acc;
+            unsigned nbits = r.nbits;
+            int trunc = 0;
+            uint32_t r0 = 1, r1 = 2, r2 = 3;
+            for (uint32_t i = 0; i < nseq; ++i) {
+                unsigned s = dx->sym[i];
+                uint32_t dist;
+                if (s < NREP) {
+                    if (s == 0) {
+                        dist = r0;
+                    } else if (s == 1) {
+                        dist = r1;
+                        r1 = r0;
+                    } else {
+                        dist = r2;
+                        r2 = r1;
+                        r1 = r0;
+                    }
+                } else {
+                    unsigned b = s - NREP;
+                    uint32_t dv = 0;
+                    if (b != 0) {
+                        unsigned nb = b - 1; /* nb <= 23: one refill suffices */
+                        BE_REFILL(nb);
+                        if (trunc)
+                            break;
+                        dv = (1u << nb) +
+                             (uint32_t)(acc & ((UINT64_C(1) << nb) - 1));
+                        acc >>= nb;
+                        nbits -= nb;
+                    }
+                    dist = dv + 1;
+                    r2 = r1;
+                    r1 = r0;
+                }
+                r0 = dist;
+                dx->dist[i] = dist;
             }
-            recent[0] = dist;
-            dx->dist[i] = dist;
+            r.pos = pos;
+            r.acc = acc;
+            r.nbits = nbits;
+            if (trunc)
+                r.failed = 1;
+            PARC_PROF_END(rc, PARC_PROF_RECONSTRUCT, 0);
         }
         if (r.failed)
             return PARC_ERR_CORRUPT;
@@ -551,6 +688,7 @@ static parc_err blk_decompress_v1(parc_blk_dctx *dx, const uint8_t *comp,
     if (read_fse_stream(&r, dx->lit, nlit, LIT_SYMS, fd) != PARC_OK)
         return PARC_ERR_CORRUPT;
 
+    PARC_PROF_BEGIN(rc);
     uint32_t pos = 0, li = 0;
     for (uint32_t i = 0; i < nseq; ++i) {
         uint32_t ll = dx->ll[i];
@@ -568,6 +706,7 @@ static parc_err blk_decompress_v1(parc_blk_dctx *dx, const uint8_t *comp,
     uint32_t tail = nlit - li;
     memcpy(dst + pos, dx->lit + li, tail);
     pos += tail;
+    PARC_PROF_END(rc, PARC_PROF_RECONSTRUCT, raw_len);
     if (pos != raw_len)
         return PARC_ERR_CORRUPT;
 
@@ -601,10 +740,12 @@ int parc_blk_compress(parc_blk_cctx *cx, const uint8_t *src, uint32_t raw_len,
     /* Non-optimal levels: one matcher, one encode; capacity raw_len - 1 makes
      * "packed must beat stored" automatic. */
     if (!cx->cfg.optimal) {
+        PARC_PROF_BEGIN(m);
         size_t nt = cx->cfg.max_chain
                         ? parc_lz_chain(src, raw_len, cx->toks, cx->htab,
                                         cx->prev, cx->cfg)
                         : parc_lz_greedy(src, raw_len, cx->toks, cx->htab);
+        PARC_PROF_END(m, PARC_PROF_LZ_MATCH, raw_len);
         return encode_block(cx, src, raw_len, cx->toks, nt, dst, raw_len - 1,
                             comp_len);
     }
@@ -619,15 +760,19 @@ int parc_blk_compress(parc_blk_cctx *cx, const uint8_t *src, uint32_t raw_len,
      * optimal candidate encodes into cx->alt capped one byte under the lazy
      * size, so it is kept only when it strictly wins. */
     parc_lz_cfg lazy = parc_lz_cfg_for_level(PARC_LZ_LEVEL_MAX - 2);
+    PARC_PROF_BEGIN(ml);
     size_t nt_lazy = parc_lz_chain(src, raw_len, cx->toks, cx->htab, cx->prev,
                                    lazy);
+    PARC_PROF_END(ml, PARC_PROF_LZ_MATCH, raw_len);
     uint32_t cl_lazy = 0;
     int r_lazy = encode_block(cx, src, raw_len, cx->toks, nt_lazy, dst,
                               raw_len - 1, &cl_lazy);
 
+    PARC_PROF_BEGIN(mo);
     size_t nt_opt = parc_lz_optimal(src, raw_len, cx->toks, cx->htab, cx->prev,
                                     cx->cfg, cx->opt_price, cx->opt_len,
                                     cx->opt_dist, cx->opt_rep);
+    PARC_PROF_END(mo, PARC_PROF_LZ_MATCH, 0);
     uint32_t opt_cap = r_lazy == PARC_BLK_PACKED ? cl_lazy - 1 : raw_len - 1;
     uint32_t cl_opt = 0;
     int r_opt = encode_block(cx, src, raw_len, cx->toks, nt_opt, cx->alt,

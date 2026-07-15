@@ -22,6 +22,7 @@ add_library(parc STATIC
     src/util/bitstream.c
     src/util/buf.c
     src/util/err.c
+    src/util/prof.c
     src/util/rng.c
     src/util/xxh64.c
 )
@@ -31,6 +32,15 @@ target_include_directories(parc
 )
 target_compile_options(parc PRIVATE -Wall -Wextra -Wconversion -Werror)
 target_link_libraries(parc PUBLIC m Threads::Threads)
+
+# Per-stage pipeline timing (src/util/prof.*). Off by default and zero-cost
+# when off; when on, the single-thread compress/decompress path prints a stage
+# breakdown to stderr. PUBLIC so the definition reaches every TU that includes
+# util/prof.h. See the `prof` preset for a ready-made profiling build.
+option(PARC_PROF "Instrument encode/decode with per-stage timers" OFF)
+if(PARC_PROF)
+    target_compile_definitions(parc PUBLIC PARC_PROF)
+endif()
 
 add_subdirectory(tools/parc)
 add_subdirectory(tools/parcgen)

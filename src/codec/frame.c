@@ -6,6 +6,7 @@
 #include "codec/block.h"
 #include "codec/frame_int.h"
 #include "util/buf.h"
+#include "util/prof.h"
 #include "util/xxh64.h"
 
 /* ---- header and trailer, shared with frame_mt.c ---- */
@@ -134,6 +135,7 @@ parc_err parc_compress_stream(FILE *in, FILE *out, const parc_copts *opts,
         return parc_frame_compress_mt(in, out, bl, threads, level,
                                       (unsigned)version, info);
     size_t bs = (size_t)1 << bl;
+    PARC_PROF_RESET();
 
     parc_err err = PARC_ERR_NOMEM;
     uint8_t *raw = malloc(bs);
@@ -155,7 +157,9 @@ parc_err parc_compress_stream(FILE *in, FILE *out, const parc_copts *opts,
     uint32_t blocks = 0, stored = 0;
 
     for (;;) {
+        PARC_PROF_BEGIN(rd);
         size_t got = fread(raw, 1, bs, in);
+        PARC_PROF_END(rd, PARC_PROF_IO_READ, got);
         if (ferror(in)) {
             err = PARC_ERR_IO;
             goto done;
@@ -168,12 +172,16 @@ parc_err parc_compress_stream(FILE *in, FILE *out, const parc_copts *opts,
         int type = parc_blk_compress(&cx, raw, raw_len, payload, &comp_len);
         const uint8_t *body = type == PARC_BLK_STORED ? raw : payload;
 
+        PARC_PROF_BEGIN(bh);
+        uint64_t bhash = parc_xxh64(raw, got, 0);
+        PARC_PROF_END(bh, PARC_PROF_BLOCK_HASH, got);
         uint8_t bhdr[BLOCK_HDR_BYTES];
-        block_hdr(bhdr, (uint8_t)type, raw_len, comp_len,
-                  parc_xxh64(raw, got, 0));
+        block_hdr(bhdr, (uint8_t)type, raw_len, comp_len, bhash);
+        PARC_PROF_BEGIN(wr);
         err = write_all(out, bhdr, sizeof bhdr);
         if (!err)
             err = write_all(out, body, comp_len);
+        PARC_PROF_END(wr, PARC_PROF_IO_WRITE, comp_len);
         if (err)
             goto done;
 
@@ -183,7 +191,9 @@ parc_err parc_compress_stream(FILE *in, FILE *out, const parc_copts *opts,
         if (err)
             goto done;
 
+        PARC_PROF_BEGIN(sh);
         parc_xxh64_update(&sh, raw, got);
+        PARC_PROF_END(sh, PARC_PROF_STREAM_HASH, got);
         total_raw += got;
         offset += BLOCK_HDR_BYTES + comp_len;
         blocks++;
@@ -206,6 +216,7 @@ parc_err parc_compress_stream(FILE *in, FILE *out, const parc_copts *opts,
     }
     err = PARC_OK;
 done:
+    PARC_PROF_REPORT(stderr);
     free(raw);
     free(payload);
     parc_blk_cctx_free(&cx);
@@ -229,6 +240,7 @@ parc_err parc_decompress_stream(FILE *in, FILE *out, const parc_dopts *opts,
     if (err)
         return err;
     size_t bs = (size_t)1 << bl;
+    PARC_PROF_RESET();
 
     uint8_t *cbuf = malloc(bs);
     uint8_t *raw = malloc(bs);
@@ -275,7 +287,9 @@ parc_err parc_decompress_stream(FILE *in, FILE *out, const parc_dopts *opts,
             goto done;
         }
 
+        PARC_PROF_BEGIN(rd);
         err = read_exact(in, cbuf, comp_len);
+        PARC_PROF_END(rd, PARC_PROF_IO_READ, comp_len);
         if (err)
             goto done;
         const uint8_t *body = cbuf;
@@ -286,11 +300,17 @@ parc_err parc_decompress_stream(FILE *in, FILE *out, const parc_dopts *opts,
                 goto done;
             body = raw;
         }
-        if (parc_xxh64(body, raw_len, 0) != want_hash) {
+        PARC_PROF_BEGIN(bh);
+        uint64_t got_hash = parc_xxh64(body, raw_len, 0);
+        PARC_PROF_END(bh, PARC_PROF_BLOCK_HASH, raw_len);
+        if (got_hash != want_hash) {
             err = PARC_ERR_CHECKSUM;
             goto done;
         }
-        if (out && fwrite(body, 1, raw_len, out) != raw_len) {
+        PARC_PROF_BEGIN(wr);
+        int wr_ok = !out || fwrite(body, 1, raw_len, out) == raw_len;
+        PARC_PROF_END(wr, PARC_PROF_IO_WRITE, out ? raw_len : 0);
+        if (!wr_ok) {
             err = PARC_ERR_IO;
             goto done;
         }
@@ -301,7 +321,9 @@ parc_err parc_decompress_stream(FILE *in, FILE *out, const parc_dopts *opts,
         if (err)
             goto done;
 
+        PARC_PROF_BEGIN(sh);
         parc_xxh64_update(&sh, body, raw_len);
+        PARC_PROF_END(sh, PARC_PROF_STREAM_HASH, raw_len);
         total_raw += raw_len;
         offset += BLOCK_HDR_BYTES + comp_len;
         blocks++;
@@ -329,6 +351,7 @@ parc_err parc_decompress_stream(FILE *in, FILE *out, const parc_dopts *opts,
     }
     err = PARC_OK;
 done:
+    PARC_PROF_REPORT(stderr);
     free(cbuf);
     free(raw);
     parc_blk_dctx_free(&dx);

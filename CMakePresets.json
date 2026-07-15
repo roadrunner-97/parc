@@ -83,6 +83,18 @@
         "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined",
         "PARC_FUZZ": "ON"
       }
+    },
+    {
+      "name": "prof",
+      "displayName": "Profiling",
+      "description": "Optimized build with per-stage pipeline timers (PARC_PROF)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_FLAGS": "-O3 -g -fno-omit-frame-pointer",
+        "CMAKE_CXX_FLAGS": "-O3 -g -fno-omit-frame-pointer",
+        "PARC_PROF": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -109,6 +121,10 @@
     {
       "name": "fuzz",
       "configurePreset": "fuzz"
+    },
+    {
+      "name": "prof",
+      "configurePreset": "prof"
     }
   ],
   "testPresets": [
