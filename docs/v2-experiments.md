@@ -131,9 +131,19 @@ from literals to reconstruct + sequences.
 
 ## Lever backlog (priority order, revised after experiment #1)
 
-**Tier 1 — reconstruct (42% of decode):**
-- Profile the reconstruct loop internally: how much is extra-bits decode vs
-  offset resolve vs the actual copy? (Split like exp #1 did for entropy.)
+**Tier 1 — reconstruct (42% of decode):** sub-profile (exp #2a): copy loop 32%,
+offset-resolve pass 10%. Note: offset extra-bits precede the literal stream in the
+wire layout, so the offset pass cannot be fused into the post-literal copy loop
+without a v2 wire change.
+- Attack the copy loop (32%): faster small-offset `copy_match` (the `dist<16`
+  doubling path does several memcpy calls per match — a branchless overlapping
+  pattern-fill would cut that); specialize the common short literal-run + short
+  match; prefetch.
+- **Tried & rejected (exp #2b):** global `-march=x86-64-v3` (AVX2). Decode +~2%
+  mixed but compress −3..6% (autovectorizer hurts the match-finder/histogram).
+  Do not re-enable globally. Open sub-lever: apply AVX2 to *decode-only* TUs
+  (block.c) via `__attribute__((target))` or a Highway copy kernel, to capture
+  the decode gain without the compress hit.
 - Larger/branch-lighter copy units in `wild_copy` / `copy_match`; 32-byte chunks;
   specialize the common short-match case.
 - Prefetch match source / destination ahead of the copy.
@@ -171,3 +181,5 @@ Cleanup (once v2 clearly wins, not a speed lever):
 |---|-----|-------|----------|----------|---------|---------|
 | 0 | a16aaa5 | baseline established (v2=Huffman literals) | — | — | — | — |
 | 1 | a16aaa5 | decode profile + strategic pivot to reconstruct/sequences | — | — | — | diagnosis only, no code |
+| 2a | 1f353b3 | reconstruct sub-profile: copy loop 32% / offset-resolve 10% | — | — | — | diagnosis only |
+| 2b | 1f353b3 | global `-march=x86-64-v3` (AVX2) build flag | ~+2% (mixed, enwik8 −1%) | **−3..6%** | 0 | **REJECT** — compress regresses |
