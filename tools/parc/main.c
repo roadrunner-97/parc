@@ -30,8 +30,9 @@ static void usage(FILE *to)
         "                     for levels 1-3, 22 = 4 MiB for levels 4-9)\n"
         "  -L, --level N      compression level N in 1..9 (default 3);\n"
         "                     higher is smaller but slower\n"
-        "  -f, --format N     wire format N in 0..1 (default 1); 0 is the\n"
-        "                     legacy Huffman format. Any parc reads either.\n"
+        "  -f, --format N     wire format N in 0..2 (default 2); 0 is the\n"
+        "                     legacy Huffman format, 1 is FSE, 2 adds the\n"
+        "                     interleaved literal stream. Any parc reads all.\n"
         "  -T, --threads N    use N worker threads (0 = one per CPU;\n"
         "                     default 1)\n"
         "  -o, --out FILE     write to FILE instead of stdout\n"
@@ -97,11 +98,13 @@ int main(int argc, char **argv)
             }
         } else if (strcmp(a, "-f") == 0 || strcmp(a, "--format") == 0) {
             unsigned wv;
-            if (++i >= argc || parse_uint(argv[i], &wv) != 0 || wv > 1) {
-                fputs("parc: -f needs a wire format in 0..1\n", stderr);
+            if (++i >= argc || parse_uint(argv[i], &wv) != 0 || wv > 2) {
+                fputs("parc: -f needs a wire format in 0..2\n", stderr);
                 return 2;
             }
-            copts.format = wv == 0 ? PARC_FORMAT_V0 : PARC_FORMAT_V1;
+            copts.format = wv == 0   ? PARC_FORMAT_V0
+                           : wv == 1 ? PARC_FORMAT_V1
+                                     : PARC_FORMAT_V2;
         } else if (strcmp(a, "-T") == 0 || strcmp(a, "--threads") == 0) {
             if (++i >= argc || parse_uint(argv[i], &threads) != 0 ||
                 threads > PARC_THREADS_MAX) {

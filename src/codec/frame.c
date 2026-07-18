@@ -40,6 +40,8 @@ static int wire_version(unsigned format)
 {
     switch (format) {
     case PARC_FORMAT_DEFAULT:
+    case PARC_FORMAT_V2:
+        return FRAME_VERSION_V2;
     case PARC_FORMAT_V1:
         return FRAME_VERSION_V1;
     case PARC_FORMAT_V0:
@@ -251,7 +253,7 @@ parc_err parc_decompress_stream(FILE *in, FILE *out, const parc_dopts *opts,
         err = PARC_ERR_NOMEM;
         goto done;
     }
-    if (version == FRAME_VERSION_V1 &&
+    if ((version == FRAME_VERSION_V1 || version == FRAME_VERSION_V2) &&
         parc_blk_dctx_init(&dx, bs) != PARC_OK) {
         err = PARC_ERR_NOMEM;
         goto done;

@@ -21,7 +21,8 @@ static const uint8_t FRAME_MAGIC[4] = {'p', 'A', 'r', 'c'};
 static const uint8_t END_MAGIC[4] = {'p', 'E', 'n', 'd'};
 #define FRAME_VERSION_V0 0 /* Huffman over a flat token stream */
 #define FRAME_VERSION_V1 1 /* FSE sequence model + repeat offsets */
-#define FRAME_VERSION_MAX 1
+#define FRAME_VERSION_V2 2 /* v1 sequence model + Huffman literal stream */
+#define FRAME_VERSION_MAX 2
 #define BLOCK_LOG_MIN 12
 #define BLOCK_LOG_MAX 24
 #define BLOCK_LOG_DEFAULT 20      /* fast levels: 1 MiB window */

@@ -34,7 +34,7 @@ parc_err blk_decode(const uint8_t *comp, uint32_t clen, uint8_t *out,
     parc_blk_dctx dx;
     size_t mb = raw_len ? raw_len : 1;
     EXPECT_EQ(parc_blk_dctx_init(&dx, mb), PARC_OK);
-    parc_err err = parc_blk_decompress(&dx, comp, clen, out, raw_len, 1);
+    parc_err err = parc_blk_decompress(&dx, comp, clen, out, raw_len, version);
     parc_blk_dctx_free(&dx);
     return err;
 }
@@ -124,7 +124,7 @@ TEST(Block, AllLevelsRoundtrip) {
     // Every level must produce a decoder-valid block for every input in both
     // wire versions; level only changes which matches are found, version only
     // the entropy stage — never correctness.
-    for (unsigned version : {0u, 1u})
+    for (unsigned version : {0u, 1u, 2u})
         for (unsigned lvl = PARC_LEVEL_MIN; lvl <= PARC_LEVEL_MAX; ++lvl)
             for (auto g : {parc_gen_random, parc_gen_text, parc_gen_json_log})
                 for (size_t n : {size_t{1}, size_t{4}, size_t{5}, size_t{63},
@@ -178,7 +178,7 @@ TEST(Block, RepeatOffsetPatternRoundtrips) {
         for (auto &b : unit) b = static_cast<uint8_t>(parc_rng_range(&rng, 256));
         std::vector<uint8_t> in(200000);
         for (size_t i = 0; i < in.size(); ++i) in[i] = unit[i % period];
-        for (unsigned version : {0u, 1u})
+        for (unsigned version : {0u, 1u, 2u})
             EXPECT_EQ(roundtrip(in, PARC_LEVEL_DEFAULT, version),
                       PARC_BLK_PACKED)
                 << "period " << period << " version " << version;
@@ -196,7 +196,7 @@ TEST(Block, RepeatOffsetPatternRoundtrips) {
 }
 
 TEST(BlockDecode, RejectsTruncatedPayload) {
-    for (unsigned version : {0u, 1u}) {
+    for (unsigned version : {0u, 1u, 2u}) {
         Packed p = make_packed(version);
         std::vector<uint8_t> out(p.raw.size() + PARC_WILDCOPY_SLACK);
         for (size_t cut : {size_t{0}, size_t{1}, size_t{100},
@@ -210,7 +210,7 @@ TEST(BlockDecode, RejectsTruncatedPayload) {
 }
 
 TEST(BlockDecode, RejectsNonMinimalCompLenAndPadding) {
-    for (unsigned version : {0u, 1u}) {
+    for (unsigned version : {0u, 1u, 2u}) {
         Packed p = make_packed(version);
         std::vector<uint8_t> out(p.raw.size() + PARC_WILDCOPY_SLACK);
         // extra byte appended: comp_len no longer minimal
@@ -225,7 +225,7 @@ TEST(BlockDecode, RejectsNonMinimalCompLenAndPadding) {
 }
 
 TEST(BlockDecode, RejectsWrongRawLen) {
-    for (unsigned version : {0u, 1u}) {
+    for (unsigned version : {0u, 1u, 2u}) {
         Packed p = make_packed(version);
         std::vector<uint8_t> out(p.raw.size() + 8 + PARC_WILDCOPY_SLACK);
         for (long d : {-3L, -1L, 1L, 3L}) {
@@ -247,7 +247,7 @@ TEST(BlockDecode, SurvivesArbitraryGarbage) {
     parc_rng rng;
     parc_rng_seed(&rng, 0xBAD);
     std::vector<uint8_t> out(4096 + PARC_WILDCOPY_SLACK);
-    for (unsigned version : {0u, 1u})
+    for (unsigned version : {0u, 1u, 2u})
         for (int iter = 0; iter < 2000; ++iter) {
             size_t clen = 1 + parc_rng_range(&rng, 700);
             std::vector<uint8_t> junk(clen);

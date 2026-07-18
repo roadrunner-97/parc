@@ -98,7 +98,7 @@ parc_err parc_blk_cctx_init(parc_blk_cctx *cx, size_t max_block, unsigned level,
                             unsigned version)
 {
     if (max_block == 0 || max_block > PARC_LZ_MAX_BLOCK || level < 1 ||
-        level > PARC_LZ_LEVEL_MAX || version > 1)
+        level > PARC_LZ_LEVEL_MAX || version > 2)
         return PARC_ERR_ARG;
     memset(cx, 0, sizeof *cx);
     cx->cfg = parc_lz_cfg_for_level(level);
@@ -120,7 +120,7 @@ parc_err parc_blk_cctx_init(parc_blk_cctx *cx, size_t max_block, unsigned level,
              cx->opt_rep && cx->alt;
     }
 
-    if (version == 1) {
+    if (version >= 1) { /* v1 and v2 share the sequence-model scratch */
         size_t nseq_max = max_block / PARC_LZ_MIN_MATCH + 1;
         cx->lit = malloc(max_block);
         cx->ll_sym = malloc(nseq_max);
@@ -370,6 +370,55 @@ static void emit_fse_stream(parc_bw *w, const uint8_t *syms, size_t count,
     parc_fse_encode(w, fe, syms, count, grp);
 }
 
+/* v2 literal stream: canonical Huffman over the 256-byte literal alphabet.
+ * Layout: 1 mode bit (0 = single stream; the 4-stream mode is reserved), then
+ * 256 four-bit code lengths (FORMAT.md §2.3), then the Huffman-coded literals.
+ * Huffman decodes several times faster than the tANS literal stream (one root
+ * lookup, no ANS state chain) at neutral ratio, which is the v2 throughput
+ * win. count >= 1 (position 0 is always a literal). */
+static void emit_huff_literals(parc_bw *w, const uint8_t *lit, size_t count)
+{
+    uint32_t freq[256];
+    hist_u8(freq, lit, count);
+    uint8_t lens[256];
+    parc_huff_lens(freq, 256, lens);
+    parc_henc he;
+    parc_henc_init(&he, lens, 256);
+    /* count is redundant with raw_len - total_match; storing it lets the
+     * decoder reject a mismatched raw_len deterministically (a wrong count
+     * that reads a valid extra 0-code out of the zero padding would otherwise
+     * slip the byte/padding check). 4 bytes/block is nil for the MiB blocks
+     * this stream serves. */
+    parc_bw_put(w, count, 32);
+    parc_bw_put(w, 0, 1); /* mode: single stream */
+    for (unsigned s = 0; s < 256; ++s)
+        parc_bw_put(w, lens[s], 4);
+    for (size_t i = 0; i < count; ++i)
+        parc_henc_put(&he, w, lit[i]);
+}
+
+static parc_err read_huff_literals(parc_br *r, uint8_t *out, size_t count)
+{
+    PARC_PROF_BEGIN(ed);
+    uint32_t stored = (uint32_t)parc_br_get(r, 32);
+    if (r->failed)
+        return PARC_ERR_TRUNCATED;
+    if (stored != count)
+        return PARC_ERR_CORRUPT; /* raw_len / total_match inconsistency */
+    (void)parc_br_get(r, 1); /* mode bit (single stream) */
+    uint8_t lens[256];
+    for (unsigned s = 0; s < 256; ++s)
+        lens[s] = (uint8_t)parc_br_get(r, 4);
+    if (r->failed)
+        return PARC_ERR_TRUNCATED;
+    parc_hdec hd;
+    if (parc_hdec_init(&hd, lens, 256) != PARC_OK || hd.nsyms == 0)
+        return PARC_ERR_CORRUPT; /* count >= 1 needs a non-empty table */
+    parc_err e = parc_hdec_decode(&hd, r, out, count);
+    PARC_PROF_END(ed, PARC_PROF_ENTROPY_DECODE, 0);
+    return e;
+}
+
 /* Emit the per-sequence extra-bits stream that trails an FSE symbol stream:
  * for each sequence i, the low bits of ex[i] whose width is the symbol's bucket
  * size — s - base - 1 bits when s > base, and none otherwise (repeat offsets and
@@ -596,8 +645,12 @@ static int encode_v1(parc_blk_cctx *cx, const uint8_t *src, uint32_t raw_len,
         emit_fse_stream(&w, cx->of_sym, nseq, OF_SYMS, fe, cx->grp);
         emit_extra_bits(&w, cx->of_sym, cx->of_ex, nseq, NREP);
     }
-    /* literals always non-empty (position 0 is always a literal) */
-    emit_fse_stream(&w, cx->lit, nlit, LIT_SYMS, fe, cx->grp);
+    /* literals always non-empty (position 0 is always a literal). v2 codes
+     * them with fast Huffman; v1 with the tANS literal stream. */
+    if (cx->version >= 2)
+        emit_huff_literals(&w, cx->lit, nlit);
+    else
+        emit_fse_stream(&w, cx->lit, nlit, LIT_SYMS, fe, cx->grp);
 
     size_t bytes = 0;
     if (parc_bw_finish(&w, &bytes) != PARC_OK) {
@@ -612,7 +665,7 @@ static int encode_v1(parc_blk_cctx *cx, const uint8_t *src, uint32_t raw_len,
 
 static parc_err blk_decompress_v1(parc_blk_dctx *dx, const uint8_t *comp,
                                   uint32_t comp_len, uint8_t *dst,
-                                  uint32_t raw_len)
+                                  uint32_t raw_len, int huff_lit)
 {
     parc_br r;
     parc_br_init(&r, comp, comp_len);
@@ -701,7 +754,9 @@ static parc_err blk_decompress_v1(parc_blk_dctx *dx, const uint8_t *comp,
     uint32_t nlit = (uint32_t)(raw_len - total_match);
     if (nlit == 0) /* position 0 is always a literal */
         return PARC_ERR_CORRUPT;
-    if (read_fse_stream(&r, dx->lit, nlit, LIT_SYMS, fd) != PARC_OK)
+    parc_err lerr = huff_lit ? read_huff_literals(&r, dx->lit, nlit)
+                             : read_fse_stream(&r, dx->lit, nlit, LIT_SYMS, fd);
+    if (lerr != PARC_OK)
         return PARC_ERR_CORRUPT;
 
     PARC_PROF_BEGIN(rc);
@@ -743,7 +798,7 @@ static int encode_block(parc_blk_cctx *cx, const uint8_t *src, uint32_t raw_len,
                         const parc_tok *toks, size_t nt, uint8_t *dst,
                         uint32_t cap, uint32_t *comp_len)
 {
-    return cx->version == 1
+    return cx->version >= 1
                ? encode_v1(cx, src, raw_len, toks, nt, dst, cap, comp_len)
                : encode_v0(cx, src, raw_len, toks, nt, dst, cap, comp_len);
 }
@@ -807,9 +862,9 @@ parc_err parc_blk_decompress(parc_blk_dctx *dx, const uint8_t *comp,
                              uint32_t comp_len, uint8_t *dst, uint32_t raw_len,
                              unsigned version)
 {
-    if (version == 1) {
+    if (version == 1 || version == 2) {
         assert(dx != NULL && raw_len <= dx->max_block);
-        return blk_decompress_v1(dx, comp, comp_len, dst, raw_len);
+        return blk_decompress_v1(dx, comp, comp_len, dst, raw_len, version == 2);
     }
     return blk_decompress_v0(comp, comp_len, dst, raw_len);
 }

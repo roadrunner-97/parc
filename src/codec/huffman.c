@@ -270,3 +270,75 @@ int parc_hdec_get(const parc_hdec *d, parc_br *r)
     (void)parc_br_get(r, len);
     return e >> 4;
 }
+
+parc_err parc_hdec_decode(const parc_hdec *d, parc_br *r, uint8_t *out,
+                          size_t count)
+{
+    if (count == 0)
+        return PARC_OK;
+    if (r->failed)
+        return PARC_ERR_TRUNCATED;
+
+    /* Register-held reader (mirrors parc_fse_decode): hold acc/nbits/pos in
+     * locals, top up from whole bytes, and resolve each symbol with one root
+     * lookup when a full root_bits window is buffered. The rare cases — a code
+     * longer than root_bits, an invalid prefix, or the last few symbols where
+     * fewer than root_bits remain — sync back to r and defer to parc_hdec_get,
+     * which handles partial availability and the bit-serial walk. */
+    const uint8_t *src = r->src;
+    size_t len = r->len;
+    size_t pos = r->pos;
+    uint64_t acc = r->acc;
+    unsigned nbits = r->nbits;
+    unsigned rb = d->root_bits;
+
+    for (size_t i = 0; i < count; ++i) {
+        if (nbits < rb) {
+            if (pos + 8 <= len) { /* one wide little-endian load tops to >=57 */
+                uint64_t word = parc_bs_read_le64(src + pos);
+                unsigned take = (64u - nbits) >> 3;
+                if (take < 8)
+                    word &= (UINT64_C(1) << (take * 8)) - 1;
+                acc |= word << nbits;
+                pos += take;
+                nbits += take * 8;
+            } else {
+                while (nbits <= 56 && pos < len) {
+                    acc |= (uint64_t)src[pos] << nbits;
+                    pos++;
+                    nbits += 8;
+                }
+            }
+        }
+        if (nbits >= rb) {
+            uint16_t e = d->tbl[acc & ((1u << rb) - 1u)];
+            unsigned l = e & 0xF;
+            if (l != HDEC_INVALID_NIB && l != HDEC_LONG_NIB) {
+                acc >>= l;
+                nbits -= l;
+                out[i] = (uint8_t)(e >> 4);
+                continue;
+            }
+        }
+        /* rare / tail: defer to the safe per-symbol decoder */
+        r->pos = pos;
+        r->acc = acc;
+        r->nbits = nbits;
+        int s = parc_hdec_get(d, r);
+        if (s < 0 || r->failed) {
+            if (r->failed)
+                return PARC_ERR_TRUNCATED;
+            r->failed = 1;
+            return PARC_ERR_CORRUPT;
+        }
+        out[i] = (uint8_t)s;
+        pos = r->pos;
+        acc = r->acc;
+        nbits = r->nbits;
+    }
+
+    r->pos = pos;
+    r->acc = acc;
+    r->nbits = nbits;
+    return PARC_OK;
+}

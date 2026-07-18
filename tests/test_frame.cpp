@@ -196,7 +196,7 @@ TEST(Frame, HeaderFieldValidation) {
             << "byte " << pos << " = " << int{val};
     };
     expect_hdr_err(0, 'q', PARC_ERR_CORRUPT);   // magic
-    expect_hdr_err(4, 2, PARC_ERR_VERSION);     // future version (0 and 1 valid)
+    expect_hdr_err(4, 3, PARC_ERR_VERSION);     // future version (0,1,2 valid)
     expect_hdr_err(5, 1, PARC_ERR_VERSION);     // unknown flag
     expect_hdr_err(6, 11, PARC_ERR_CORRUPT);    // block_log too small
     expect_hdr_err(6, 25, PARC_ERR_CORRUPT);    // block_log too large
@@ -240,7 +240,7 @@ TEST(Frame, ErrorTaxonomyExamples) {
 }
 
 TEST(Frame, EveryTruncationFailsCleanly) {
-    for (unsigned fmt : {PARC_FORMAT_V0, PARC_FORMAT_V1}) {
+    for (unsigned fmt : {PARC_FORMAT_V0, PARC_FORMAT_V1, PARC_FORMAT_V2}) {
         std::vector<uint8_t> content;
         const auto frame = mixed_frame(&content, fmt);
         for (size_t n = 0; n < frame.size(); ++n) {
@@ -259,7 +259,7 @@ TEST(Frame, EveryTruncationFailsCleanly) {
 }
 
 TEST(Frame, EveryByteMutationFailsOrDecodesIdentically) {
-    for (unsigned fmt : {PARC_FORMAT_V0, PARC_FORMAT_V1}) {
+    for (unsigned fmt : {PARC_FORMAT_V0, PARC_FORMAT_V1, PARC_FORMAT_V2}) {
         std::vector<uint8_t> content;
         const auto frame = mixed_frame(&content, fmt);
         for (size_t pos = 0; pos < frame.size(); ++pos) {

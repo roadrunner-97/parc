@@ -206,11 +206,12 @@ static parc_err dmt_work(void *vctx, void *wctx, parc_mt_slot *s)
     return PARC_OK;
 }
 
-/* Per-worker decode scratch: a block dctx for version 1, nothing for v0. */
+/* Per-worker decode scratch: a block dctx for the sequence-model versions
+ * (v1, v2), nothing for v0. */
 static parc_err dmt_wctx_init(void *vctx, void **wctx)
 {
     dmt_ctx *c = vctx;
-    if (c->version != FRAME_VERSION_V1) {
+    if (c->version != FRAME_VERSION_V1 && c->version != FRAME_VERSION_V2) {
         *wctx = NULL;
         return PARC_OK;
     }

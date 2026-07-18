@@ -421,4 +421,3 @@ parc_err parc_fse_decode(parc_br *r, const parc_fdec *d, uint8_t *out,
     }
     return PARC_OK;
 }
-

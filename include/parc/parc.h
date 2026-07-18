@@ -30,7 +30,9 @@ extern "C" {
  * cross-version tests. Any decoder reads either format. */
 #define PARC_FORMAT_DEFAULT 0
 #define PARC_FORMAT_V0 1 /* Huffman token stream */
-#define PARC_FORMAT_V1 2 /* FSE sequence model + repeat offsets (latest) */
+#define PARC_FORMAT_V1 2 /* FSE sequence model + repeat offsets */
+#define PARC_FORMAT_V2 3 /* v1 sequence model + Huffman literal stream (latest,
+                            unfinalized: the literal-stage sandbox) */
 
 typedef struct parc_copts {
     /* log2 of the maximum block size: 0 for the default, else 12..24. The

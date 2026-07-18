@@ -77,6 +77,16 @@ parc_err parc_hdec_init(parc_hdec *d, const uint8_t *lens, unsigned n);
  * an error either way). Must not be called on an empty table. */
 int parc_hdec_get(const parc_hdec *d, parc_br *r);
 
+/* Decode `count` symbols into out[0..count) with a register-held local reader
+ * (one wide refill per several symbols, single root-table lookup per symbol,
+ * rare long-code fallback), the libdeflate-style hot path — several times
+ * faster than a parc_hdec_get loop. Returns PARC_ERR_CORRUPT on an invalid
+ * code or PARC_ERR_TRUNCATED if the stream ran short; leaves r's state
+ * consistent for the caller's downstream checks. count may be 0. Must not be
+ * called on an empty table (d->nsyms > 0). */
+parc_err parc_hdec_decode(const parc_hdec *d, parc_br *r, uint8_t *out,
+                          size_t count);
+
 #ifdef __cplusplus
 }
 #endif
