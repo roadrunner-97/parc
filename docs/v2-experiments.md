@@ -53,7 +53,7 @@ tools/run_bench.sh --benchmark_filter='parc-2|parc-1'   # archives bench/results
 python3 tools/plot_bench.py                             # refresh docs/benchmarks/*.png
 ```
 
-## Baseline — commit `<scaffold>` (v2 = Huffman literals, pre-optimization)
+## Baseline — commit `a16aaa5` (v2 = Huffman literals, pre-optimization)
 
 Quick bench, `--benchmark_min_time=0.15s` (noisy, single-iter enwik8):
 
@@ -71,26 +71,71 @@ yet faster at decode** — slightly slower than v1 on enwik8/dickens, tied on
 webster. The intended "Huffman decodes faster than tANS" win has not materialized;
 finding out why (and fixing it) is experiment #1.
 
-## Lever backlog (unordered; refine as we learn)
+## Experiment #1 — decode profile & strategic pivot (commit `a16aaa5`)
 
-Decode-side (primary):
-- **Diagnose why Huffman literals aren't beating tANS.** Profile the v2 decode
-  (`PARC_PROF` stage timers already exist). Is the literal stage even the
-  bottleneck, or is it match reconstruction / sequence decode? Measure before
-  optimizing — the literal decoder may be fine and the win is elsewhere.
-- Wider Huffman root table (root_bits) to cut long-code fallbacks; measure table
-  build cost vs decode gain.
-- Double/quad literal decode per refill (decode 2 symbols between refills when
-  root_bits*2 fit the accumulator) — the classic libdeflate trick.
-- 4-stream interleaved literals (parallel Huffman decoders hiding latency) — the
-  "mode bit" is already reserved for this in the wire layout.
-- Batch/branchless sequence (LL/ML/OF) decode; fuse extra-bits.
-- Reconstruct loop: overlap-safe wildcopy tuning, larger copy units.
-- Prefetch destination / literal source ahead.
+Profiled single-thread v2 decode of enwik8 (`build-relprof`, PARC_PROF=ON,
+`parc t -T 1`), splitting the literal Huffman stage from the sequence stages by
+temporarily billing it to a separate timer. **Clean v2 decode split (enwik8, L3):**
 
-Encode-side (secondary but in scope):
+| component                                    |  time  | % decode |
+|----------------------------------------------|-------:|---------:|
+| reconstruct (match copy + offset + extrabits)| 75.1ms |    42%   |
+| sequence decode (LL/ML/OF tANS, 3 streams)   | 63.3ms |    35%   |
+| literal decode (Huffman, 1 stream)           | 24.8ms |    14%   |
+| block_hash + stream_hash + io               | ~15ms  |    ~9%   |
+
+**Why Huffman literals didn't win:** both tANS and this Huffman decoder are
+register-held, one-table-lookup-per-symbol loops, so per-symbol cost is equal;
+the aggregate `entropy_decode` was unchanged (v1 87.3ms vs v2 88.7ms). And the
+literal stream is **only 14% of decode** — the v2 premise optimized the small
+corner. v1's aggregate entropy_decode (87ms) ≈ v2's sequences(63)+literals(25).
+
+**Pivot — where the decode time actually is:**
+1. **reconstruct — 42%.** Match/literal copy, offset resolve, extra-bits. Wire-
+   format-neutral to speed up; benefits every version. Highest priority.
+2. **sequence decode — 35%.** The three LL/ML/OF FSE streams dominate literals
+   2.5×. Batching/interleaving/faster-table here beats any literal work.
+3. **literal decode — 14%.** Even a 2× literal speedup is only ~7% of decode.
+   Deprioritized. Multi-symbol Huffman table stays on the backlog but below 1&2.
+
+**SIMD note (answering the standing question):** entropy decode (both tANS and
+Huffman) is a serial bit-accumulator recurrence — each symbol's bit offset
+depends on the previous symbol's code length — so the compiler cannot
+autovectorize it and hand-SIMD needs *independent* streams. The 4-stream
+interleaved layout (reserved v2 mode bit) is the only route to ILP/SIMD in the
+literal/sequence decode. Reconstruct's copy loop is memcpy-shaped and already
+compiler-vectorizable (wild_copy).
+
+**Verdict:** no code change kept — diagnosis only. Redirects all further work
+from literals to reconstruct + sequences.
+
+## Lever backlog (priority order, revised after experiment #1)
+
+**Tier 1 — reconstruct (42% of decode):**
+- Profile the reconstruct loop internally: how much is extra-bits decode vs
+  offset resolve vs the actual copy? (Split like exp #1 did for entropy.)
+- Larger/branch-lighter copy units in `wild_copy` / `copy_match`; 32-byte chunks;
+  specialize the common short-match case.
+- Prefetch match source / destination ahead of the copy.
+- Fuse extra-bits decode into the sequence decode (avoid a second pass over seqs).
+- Reduce per-sequence branching (repeat-offset resolve is branchy).
+
+**Tier 2 — sequence decode (35% of decode, 3 tANS streams):**
+- Interleave/batch the LL/ML/OF FSE decode so the 3 streams' lookups overlap
+  (ILP); or a single fused pass.
+- Faster FSE table / wider tables / fewer renormalizations.
+- Consider whether LL/ML/OF even need full tANS at these ratios, or a cheaper
+  code (this is a wire-format change → v2 only).
+
+**Tier 3 — literals (only 14%; deprioritized):**
+- Multi-symbol Huffman root table (decode 2 short codes per lookup) — real but
+  small (~7% ceiling). 4-stream interleaved literals (reserved mode bit) — the
+  SIMD/ILP route, bigger but more invasive.
+- Wider root_bits to cut long-code fallbacks (measure table-build cost).
+
+**Encode-side (secondary):**
 - Faster histogram / Huffman length building.
-- Cheaper match finding at fast levels (already partly done in Phase 5).
+- Cheaper match finding at fast levels (partly done in Phase 5).
 
 Ratio levers (only if ~free or they unlock a bigger speed win):
 - Huffman table transmission cost (256×4 bits) is heavy for small blocks — RLE /
@@ -104,4 +149,5 @@ Cleanup (once v2 clearly wins, not a speed lever):
 
 | # | rev | lever | decode Δ | encode Δ | ratio Δ | verdict |
 |---|-----|-------|----------|----------|---------|---------|
-| — | —   | (baseline established) | —        | —        | —       | —       |
+| 0 | a16aaa5 | baseline established (v2=Huffman literals) | — | — | — | — |
+| 1 | a16aaa5 | decode profile + strategic pivot to reconstruct/sequences | — | — | — | diagnosis only, no code |
