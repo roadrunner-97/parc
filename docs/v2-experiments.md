@@ -24,6 +24,22 @@ it never repeats a lever or silently regresses.
   their tests green; once v2 clearly wins, a dedicated cleanup commit removes them.
 - **Commit policy:** each verified win = its own commit on `phase5-decode-speed`,
   **pushed** to `origin` for remote backup.
+- **SIMD library — MANDATORY:** any SIMD work uses **Google Highway** (`hwy`), not
+  raw intrinsics or another wrapper. This is a user directive. Add `hwy` via
+  FetchContent in CMake like googletest/googlebenchmark already are. Do not
+  hand-roll AVX2 intrinsics.
+  - **C/C++ boundary is a non-issue.** Highway is C++-only; the codec is C. SIMD
+    kernels go in a `.cc` TU exposing `extern "C"` entry points (Highway
+    `HWY_NAMESPACE` + static/dynamic dispatch). These kernels are **coarse** — one
+    call per stream/block over thousands of bytes — so the cross-language call is
+    amortized to nothing. Never structure SIMD as a per-symbol cross-TU call.
+    (LTO is already ON in build-release: `CMAKE_INTERPROCEDURAL_OPTIMIZATION=ON`,
+    single gcc toolchain, so cross-language inlining happens too — but it isn't
+    needed for coarse kernels.)
+  - **Pivot to C++ only for ergonomics, not speed.** If the `extern "C"` glue
+    becomes painful or we want fine-grained Highway integration, convert the
+    specific hot TU(s) to C++ (they compile as C++ nearly as-is) — a per-file
+    pivot, not a whole-project rewrite. Performance never requires it.
 
 ## Iteration protocol (each loop turn)
 
@@ -104,7 +120,8 @@ depends on the previous symbol's code length — so the compiler cannot
 autovectorize it and hand-SIMD needs *independent* streams. The 4-stream
 interleaved layout (reserved v2 mode bit) is the only route to ILP/SIMD in the
 literal/sequence decode. Reconstruct's copy loop is memcpy-shaped and already
-compiler-vectorizable (wild_copy).
+compiler-vectorizable (wild_copy). When SIMD is pursued, use **Google Highway**
+(see the guardrail above) — not raw intrinsics.
 
 **Verdict:** no code change kept — diagnosis only. Redirects all further work
 from literals to reconstruct + sequences.
