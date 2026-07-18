@@ -36,10 +36,13 @@ it never repeats a lever or silently regresses.
     (LTO is already ON in build-release: `CMAKE_INTERPROCEDURAL_OPTIMIZATION=ON`,
     single gcc toolchain, so cross-language inlining happens too — but it isn't
     needed for coarse kernels.)
-  - **Pivot to C++ only for ergonomics, not speed.** If the `extern "C"` glue
-    becomes painful or we want fine-grained Highway integration, convert the
-    specific hot TU(s) to C++ (they compile as C++ nearly as-is) — a per-file
-    pivot, not a whole-project rewrite. Performance never requires it.
+  - **Pivot to C++ only for ergonomics, not speed** — and the if/when is Claude's
+    call (user delegated it, happy either way). If the `extern "C"` glue becomes
+    painful or we want fine-grained Highway integration, convert the specific hot
+    TU(s) to C++ (they compile as C++ nearly as-is) — a per-file pivot, not a
+    whole-project rewrite. Barrier is low: the project already builds & links C++
+    (gtest + gbench), so the toolchain/standard/CMake C++ path is established.
+    Performance never requires it.
 
 ## Iteration protocol (each loop turn)
 
